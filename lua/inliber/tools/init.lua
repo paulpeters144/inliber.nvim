@@ -28,6 +28,7 @@ local tokens = require("inliber.utils.tokens")
 ---@field messages table The message list for the LLM
 ---@field registry Inliber.Tools.Registry The tools available to the loop
 ---@field status string The status of the loop
+---@field structured_output? Inliber.StructuredOutput.Schema The JSON schema the LLM's final text must match
 ---@field tokens? number|table The tokens reported by the adapter
 ---@field tool_orchestrator? Inliber.Tools.Orchestrator Coordinates running tools
 
@@ -37,6 +38,7 @@ local tokens = require("inliber.utils.tokens")
 ---@field bufnr? number The buffer the loop is started from
 ---@field callbacks { on_completed: fun(loop: Inliber.ToolLoop, result: table), on_cancelled: fun(), on_status?: fun(tool_name: string?, status: string, label?: string) }
 ---@field messages table The messages to seed the loop
+---@field structured_output? Inliber.StructuredOutput.Schema Constrain the LLM's final text to this JSON schema
 
 ---@class Inliber.Tools.Host
 ---@field id number The loop id
@@ -131,6 +133,7 @@ function ToolLoop.new(opts)
     cycle = 1,
     messages = opts.messages or {},
     status = CONSTANTS.STATUS_SUCCESS,
+    structured_output = opts.structured_output,
   }, { __index = ToolLoop })
 
   if opts.approval_mode then
@@ -431,6 +434,7 @@ function ToolLoop:submit(opts)
   local payload = {
     messages = self.adapter:map_roles(shallow_messages),
     tools = (not vim.tbl_isempty(self.registry.schemas) and { self.registry.schemas } or {}),
+    structured_output = self.structured_output,
   }
 
   log:trace("[ToolLoop] Messages:\n%s", payload.messages)

@@ -119,6 +119,30 @@ Example:
 }
 ]],
 
+  -- Enforced via the adapter's structured outputs when using tools. `error` is
+  -- optional so the LLM can still explain why it couldn't answer
+  SCHEMA_ASK = {
+    type = "object",
+    required = { "message" },
+    properties = {
+      message = { type = "string" },
+      error = { type = "string" },
+    },
+    additionalProperties = false,
+  },
+
+  SCHEMA_EDIT = {
+    type = "object",
+    required = { "code", "language", "placement" },
+    properties = {
+      code = { type = "string" },
+      language = { type = "string" },
+      placement = { type = "string", enum = { "replace", "add", "before", "new" } },
+      error = { type = "string" },
+    },
+    additionalProperties = false,
+  },
+
   RESPONSE_EDIT = [[Return your code and placement in valid JSON matching this schema:
 
 {
@@ -520,6 +544,7 @@ function Inline:submit_with_tools(prompts)
     adapter = self.adapter,
     bufnr = self.buffer_context.bufnr,
     messages = messages,
+    structured_output = self:_structured_output(),
     approval_mode = tools.opts and tools.opts.approval_mode,
     callbacks = {
       on_completed = function(loop, result)
@@ -629,6 +654,15 @@ function Inline:_response_schema()
   return CONSTANTS.RESPONSE_EDIT
 end
 
+---Get the structured output schema for the current intent
+---@return Inliber.StructuredOutput.Schema
+function Inline:_structured_output()
+  if self.intent == "ask" then
+    return { name = "inline_ask", schema = CONSTANTS.SCHEMA_ASK }
+  end
+  return { name = "inline_edit", schema = CONSTANTS.SCHEMA_EDIT }
+end
+
 ---Prepare messages for the tool loop by appending the JSON format instruction to the user message
 ---@param prompts table The original prompts
 ---@return table Messages suitable for the tool loop
@@ -639,7 +673,8 @@ function Inline:_prepare_tool_messages(prompts)
 IMPORTANT: After gathering any context you need, you MUST respond with ONLY valid JSON in this format:
 %s
 
-Do not include markdown, code fences, or explanations outside the JSON.]],
+Do not include markdown, code fences, or explanations outside the JSON.
+Write the JSON as your final text reply. Do not call a tool to produce it; only call the tools you were given.]],
     self:_response_schema()
   )
 
