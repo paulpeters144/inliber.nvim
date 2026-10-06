@@ -711,13 +711,7 @@ return {
       type = "boolean",
       optional = true,
       desc = "Enable extended thinking for more thorough reasoning. Requires thinking_budget to be set.",
-      default = function(self)
-        local models = adapter_utils.model_choice(self)
-        if models and models.opts and models.opts.can_reason == true then
-          return true
-        end
-        return false
-      end,
+      default = false,
       ---@param self Inliber.HTTPAdapter
       enabled = function(self)
         local models = adapter_utils.model_choice(self)
