@@ -1,0 +1,113 @@
+---@class Inliber.Inline.EditorContext
+---@field config table
+---@field inline Inliber.Inline
+---@field editor_context_items table
+---@field prompt string The user prompt to check for editor context
+
+---@class Inliber.Inline.EditorContextItems
+---@field context table
+
+---@class Inliber.Inline.EditorContextArgs
+---@field context table
+
+local config = require("inliber.config")
+local log = require("inliber.utils.log")
+local regex = require("inliber.utils.regex")
+local utils = require("inliber.utils")
+
+local CONSTANTS = {
+  PREFIX = "#",
+}
+
+---@class Inliber.Inline.EditorContext
+local EditorContext = {}
+
+function EditorContext.new(args)
+  local self = setmetatable({
+    config = config.interactions.inline.editor_context,
+    inline = args.inline,
+    prompt = args.prompt,
+    editor_context_items = {},
+  }, { __index = EditorContext })
+
+  return self
+end
+
+---Creates a regex pattern to match editor context in a message
+---@param item string The editor_context name to create a pattern for
+---@param include_params? boolean Whether to include parameters in the pattern
+---@return string The compiled regex pattern
+function EditorContext:_pattern(item, include_params)
+  local escaped_ec = vim.pesc(item)
+  return CONSTANTS.PREFIX .. "{" .. escaped_ec .. "}" .. (include_params and "{[^}]*}" or "")
+end
+
+---Check a prompt for editor context
+---@return Inliber.Inline.EditorContext
+function EditorContext:find()
+  for item, _ in pairs(self.config) do
+    if regex.find(self.prompt, self:_pattern(item)) then
+      table.insert(self.editor_context_items, item)
+    end
+  end
+
+  return self
+end
+
+---Replace editor context in the prompt
+---@return Inliber.Inline.EditorContext
+function EditorContext:replace()
+  for item, _ in pairs(self.config) do
+    self.prompt = vim.trim(regex.replace(self.prompt, self:_pattern(item), ""))
+  end
+  return self
+end
+
+---Add the editor context to the inline class as prompts
+---@return table
+function EditorContext:output()
+  local outputs = {}
+
+  -- Loop through the found editor context items
+  for _, item in ipairs(self.editor_context_items) do
+    if not self.config[item] then
+      return log:error("[EditorContext] `%s` is not defined in the config", item)
+    end
+
+    local ec_output
+    local ec_config = self.config[item]
+
+    if type(ec_config.callback) == "function" then
+      local ok, output = pcall(ec_config.callback, self)
+      if not ok then
+        log:error("[EditorContext] %s could not be resolved: %s", item, output)
+      else
+        if output then
+          table.insert(outputs, output)
+        end
+      end
+      goto skip
+    end
+
+    ec_output = utils.resolve({ value = ec_config.path, source = "EditorContext" })
+    if not ec_output then
+      goto skip
+    end
+
+    if (ec_config.opts and ec_config.opts.contains_code) and not config.can_send_code() then
+      log:warn("Sending of code has been disabled")
+      goto skip
+    end
+
+    local output = ec_output.new({ context = self.inline.buffer_context }):output()
+    if output then
+      table.insert(outputs, output)
+    end
+
+    ::skip::
+  end
+
+  return outputs
+end
+
+return EditorContext

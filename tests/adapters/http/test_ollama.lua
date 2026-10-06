@@ -1,0 +1,524 @@
+local h = require("tests.helpers")
+local tags = require("inliber.interactions.shared.tags")
+local adapter
+
+local child = MiniTest.new_child_neovim()
+local new_set = MiniTest.new_set
+T = new_set()
+
+T["Ollama adapter"] = new_set({
+  hooks = {
+    pre_case = function()
+      adapter = require("inliber.adapters").extend("ollama", {
+        schema = {
+          model = {
+            default = "llama3.1:latest",
+          },
+          choices = {
+            "llama3.1:latest",
+          },
+          num_ctx = {
+            default = 20000,
+          },
+        },
+      })
+    end,
+  },
+})
+
+T["Ollama adapter"]["it can form messages to be sent to the API"] = function()
+  local messages = { {
+    content = "Explain Ruby in two words",
+    role = "user",
+  } }
+
+  h.eq({ messages = messages }, adapter.handlers.form_messages(adapter, messages))
+end
+
+T["Ollama adapter"]["it can form messages with tools"] = function()
+  local messages = {
+    {
+      role = "user",
+      content = "What's the weather like in London and Paris?",
+    },
+    {
+      role = "llm",
+      tools = {
+        calls = {
+          {
+            ["function"] = {
+              arguments = '{"location":"London, UK","units":"fahrenheit"}',
+              name = "weather",
+            },
+            type = "function",
+          },
+          {
+            ["function"] = {
+              arguments = '{"location":"Paris, France","units":"fahrenheit"}',
+              name = "weather",
+            },
+            type = "function",
+          },
+        },
+      },
+    },
+    {
+      role = "tool",
+      content = "Ran the weather tool **Tool Output**: The weather in London, UK is 15° fahrenheit",
+    },
+    {
+      role = "tool",
+      content = "Ran the weather tool **Tool Output**: The weather in Paris, France is 15° fahrenheit",
+    },
+  }
+
+  local output = {
+    messages = {
+      {
+        content = "What's the weather like in London and Paris?",
+        role = "user",
+      },
+      {
+        role = "llm",
+        tool_calls = {
+          {
+            ["function"] = {
+              arguments = '{"location":"London, UK","units":"fahrenheit"}',
+              name = "weather",
+            },
+            type = "function",
+          },
+          {
+            ["function"] = {
+              arguments = '{"location":"Paris, France","units":"fahrenheit"}',
+              name = "weather",
+            },
+            type = "function",
+          },
+        },
+      },
+      {
+        content = "Ran the weather tool **Tool Output**: The weather in London, UK is 15° fahrenheit",
+        role = "tool",
+      },
+      {
+        content = "Ran the weather tool **Tool Output**: The weather in Paris, France is 15° fahrenheit",
+        role = "tool",
+      },
+    },
+  }
+
+  -- Ensure that a content field is added to the messages
+  local correct_messages = vim.deepcopy(messages)
+  correct_messages[2].content = ""
+
+  h.eq(output, adapter.handlers.form_messages(adapter, messages))
+end
+
+T["Ollama adapter"]["it can form tools to be sent to the API"] = function()
+  local weather = require("tests.stubs.weather").schema
+  local tools = { weather = { weather } }
+
+  h.eq({ tools = { weather } }, adapter.handlers.form_tools(adapter, tools))
+end
+
+T["Ollama adapter"]["Streaming"] = new_set()
+
+T["Ollama adapter"]["Streaming"]["can output streamed data into the chat buffer"] = function()
+  local output = ""
+  local lines = vim.fn.readfile("tests/adapters/http/stubs/ollama_streaming.txt")
+  for _, line in ipairs(lines) do
+    local chat_output = adapter.handlers.chat_output(adapter, line)
+    if chat_output and chat_output.output.content then
+      output = output .. chat_output.output.content
+    end
+  end
+
+  h.eq("**Dynamic Object-Oriented**", output)
+end
+
+T["Ollama adapter"]["Streaming"]["can form messages with images"] = function()
+  local messages = {
+    {
+      content = "How are you?",
+      role = "user",
+    },
+    {
+      content = "I am fine, thanks. How can I help?",
+      role = "assistant",
+    },
+    {
+      content = "somefakebase64encoding",
+      role = "user",
+      context = {
+        id = "<image>https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg</image>",
+        mimetype = "image/jpg",
+      },
+      _meta = {
+        tag = tags.IMAGE,
+      },
+      opts = {
+        visible = false,
+      },
+    },
+    {
+      content = "What is this an image of?",
+      role = "user",
+    },
+  }
+
+  local expected = {
+    {
+      content = "How are you?",
+      role = "user",
+    },
+    {
+      content = "I am fine, thanks. How can I help?",
+      role = "assistant",
+    },
+    {
+      images = { "somefakebase64encoding" },
+      role = "user",
+    },
+    {
+      content = "What is this an image of?",
+      role = "user",
+    },
+  }
+
+  h.eq(expected, adapter.handlers.form_messages(adapter, messages).messages)
+end
+
+T["Ollama adapter"]["Streaming"]["can process tools"] = function()
+  local tools = {}
+  local lines = vim.fn.readfile("tests/adapters/http/stubs/ollama_tools_streaming.txt")
+  for _, line in ipairs(lines) do
+    adapter.handlers.chat_output(adapter, line, tools)
+  end
+
+  local expected_tool_output = {
+    {
+      ["function"] = {
+        arguments = '{"units":"celsius","location":"London, UK"}',
+        name = "weather",
+      },
+      type = "function",
+    },
+    {
+      ["function"] = {
+        arguments = '{"units":"fahrenheit","location":"Paris, FR"}',
+        name = "weather",
+      },
+      type = "function",
+    },
+  }
+
+  h.expect_json_equals(expected_tool_output[1]["function"]["arguments"], tools[1]["function"]["arguments"])
+  h.expect_json_equals(expected_tool_output[2]["function"]["arguments"], tools[2]["function"]["arguments"])
+
+  -- NOTE: the native ollama API adapter uses the openai format_tool_calls method, and it
+  -- seems to work fine.
+  --
+  -- local formatted_tools = {
+  --   {
+  --     arguments = {
+  --       location = "London, UK",
+  --       units = "celsius",
+  --     },
+  --     name = "weather",
+  --   },
+  --   {
+  --     arguments = {
+  --       location = "Paris, FR",
+  --       units = "fahrenheit",
+  --     },
+  --     name = "weather",
+  --   },
+  -- }
+  --
+  -- h.eq(formatted_tools, adapter.handlers.tools.format_tool_calls(adapter, tools))
+end
+
+T["Ollama adapter"]["Streaming"]["can process reasoning chat output"] = function()
+  local output = {
+    content = "",
+    reasoning = {
+      content = "",
+    },
+  }
+  local lines = vim.fn.readfile("tests/adapters/http/stubs/ollama_reasoning_streaming.txt")
+  for _, line in ipairs(lines) do
+    local chat_output = adapter.handlers.chat_output(adapter, line)
+    if chat_output then
+      if chat_output.output.reasoning and chat_output.output.reasoning.content then
+        output.reasoning.content = output.reasoning.content .. chat_output.output.reasoning.content
+      end
+      if chat_output.output.content then
+        output.content = output.content .. chat_output.output.content
+      end
+    end
+  end
+
+  h.eq("This is a dummy thinking process.", output.reasoning.content)
+  h.eq("**Dynamic Object-Oriented**", output.content)
+end
+
+T["Ollama adapter"]["No Streaming"] = new_set({
+  hooks = {
+    pre_case = function()
+      adapter = require("inliber.adapters").extend("ollama", {
+        opts = {
+          stream = false,
+        },
+      })
+    end,
+  },
+})
+
+T["Ollama adapter"]["No Streaming"]["can output for the chat buffer"] = function()
+  local data = vim.fn.readfile("tests/adapters/http/stubs/ollama_no_streaming.txt")
+  data = table.concat(data, "\n")
+
+  -- Match the format of the actual request
+  local json = { body = data }
+
+  h.eq("Dynamic Scripting language", adapter.handlers.chat_output(adapter, json).output.content)
+end
+
+T["Ollama adapter"]["No Streaming"]["can process tools"] = function()
+  local data = vim.fn.readfile("tests/adapters/http/stubs/ollama_tools_no_streaming.txt")
+  data = table.concat(data, "\n")
+
+  local tools = {}
+
+  -- Match the format of the actual request
+  local json = { body = data }
+  adapter.handlers.chat_output(adapter, json, tools)
+
+  local tool_output = {
+    {
+      ["function"] = {
+        arguments = '{"location":"London, UK","units":"celsius"}',
+        name = "weather",
+      },
+      type = "function",
+    },
+    {
+      ["function"] = {
+        arguments = '{"location":"Paris, FR","units":"fahrenheit"}',
+        name = "weather",
+      },
+      type = "function",
+    },
+  }
+
+  h.expect_json_equals(tool_output[1]["function"]["arguments"], tools[1]["function"]["arguments"])
+  h.expect_json_equals(tool_output[2]["function"]["arguments"], tools[2]["function"]["arguments"])
+
+  -- local formatted_tools = {
+  --   {
+  --     arguments = {
+  --       location = "London, UK",
+  --       units = "celsius",
+  --     },
+  --     name = "weather",
+  --   },
+  --   {
+  --     arguments = {
+  --       location = "Paris, FR",
+  --       units = "fahrenheit",
+  --     },
+  --     name = "weather",
+  --   },
+  -- }
+  --
+  -- h.eq(formatted_tools, adapter.handlers.tools.format_tool_calls(adapter, tools))
+end
+
+T["Ollama adapter"]["No Streaming"]["can output for the inline assistant"] = function()
+  local data = vim.fn.readfile("tests/adapters/http/stubs/ollama_no_streaming.txt")
+  data = table.concat(data, "\n")
+
+  -- Match the format of the actual request
+  local json = { body = data }
+
+  h.eq("Dynamic Scripting language", adapter.handlers.inline_output(adapter, json).output)
+end
+
+T["Ollama adapter"]["OLLAMA_HOST"] = new_set()
+
+T["Ollama adapter"]["OLLAMA_HOST"]["uses OLLAMA_HOST when set"] = function()
+  local adapter_utils = require("inliber.adapters.utils")
+  vim.env.OLLAMA_HOST = "http://192.168.1.100:11434"
+  adapter_utils.get_env_vars(adapter)
+  h.eq("http://192.168.1.100:11434", adapter.env_replaced.url)
+  vim.env.OLLAMA_HOST = nil
+end
+
+T["Ollama adapter"]["OLLAMA_HOST"]["fallback to localhost when OLLAMA_HOST is not set"] = function()
+  local adapter_utils = require("inliber.adapters.utils")
+  vim.env.OLLAMA_HOST = nil
+  adapter_utils.get_env_vars(adapter)
+  h.eq("http://localhost:11434", adapter.env_replaced.url)
+end
+
+T["Ollama get_models"] = new_set({
+  hooks = {
+    pre_case = function()
+      h.child_start(child)
+      child.lua([[
+        h = require('tests.helpers')
+        require('inliber').setup({})
+      ]])
+    end,
+    post_once = child.stop,
+  },
+})
+
+T["Ollama get_models"]["choices() extracts context_window into meta"] = function()
+  local result = child.lua([[
+    local get_models = require("inliber.adapters.http.ollama.get_models")
+    local Curl = require("plenary.curl")
+
+    local tags_body = vim.json.encode({
+      models = { { name = "llama3.1:latest" } },
+    })
+    local show_body = vim.json.encode({
+      capabilities = { "completion" },
+      details = {
+        family = "llama",
+        families = { "llama" },
+        format = "gguf",
+        parameter_size = "8.0B",
+        parent_model = "",
+        quantization_level = "Q4_0",
+      },
+      model_info = {
+        ["llama.context_length"] = 8192,
+      },
+    })
+
+    Curl.get = function(url, opts)
+      if opts.callback then
+        opts.callback({ status = 200, body = tags_body })
+      end
+    end
+    Curl.post = function(url, opts)
+      if opts.callback then
+        opts.callback({ status = 200, body = show_body })
+      end
+    end
+
+    local adapter = require("inliber.adapters.http").extend("ollama", {
+      schema = {
+        model = {
+          default = "llama3.1:latest",
+          choices = { "llama3.1:latest" },
+        },
+      },
+    })
+
+    return get_models.choices(adapter, { async = false })
+  ]])
+
+  h.eq({ context_window = 8192 }, result["llama3.1:latest"].meta)
+  h.eq(false, result["llama3.1:latest"].opts.can_reason)
+  h.eq(false, result["llama3.1:latest"].opts.can_use_tools)
+  h.eq(false, result["llama3.1:latest"].opts.has_vision)
+end
+
+T["Ollama get_models"]["choices() extracts capabilities into opts"] = function()
+  local result = child.lua([[
+    local get_models = require("inliber.adapters.http.ollama.get_models")
+    local Curl = require("plenary.curl")
+
+    local tags_body = vim.json.encode({
+      models = { { name = "qwq:latest" } },
+    })
+    local show_body = vim.json.encode({
+      capabilities = { "completion", "thinking", "tools", "vision" },
+      details = {
+        family = "qwen3",
+        families = { "qwen3" },
+        format = "gguf",
+        parameter_size = "32.8B",
+        parent_model = "",
+        quantization_level = "Q4_0",
+      },
+      model_info = {
+        ["qwen3.context_length"] = 40960,
+      },
+    })
+
+    Curl.get = function(url, opts)
+      if opts.callback then
+        opts.callback({ status = 200, body = tags_body })
+      end
+    end
+    Curl.post = function(url, opts)
+      if opts.callback then
+        opts.callback({ status = 200, body = show_body })
+      end
+    end
+
+    local adapter = require("inliber.adapters.http").extend("ollama", {
+      schema = {
+        model = {
+          default = "qwq:latest",
+          choices = { "qwq:latest" },
+        },
+      },
+    })
+
+    return get_models.choices(adapter, { async = false })
+  ]])
+
+  h.eq({ context_window = 40960 }, result["qwq:latest"].meta)
+  h.eq(true, result["qwq:latest"].opts.can_reason)
+  h.eq(true, result["qwq:latest"].opts.can_use_tools)
+  h.eq(true, result["qwq:latest"].opts.has_vision)
+end
+
+T["Ollama get_models"]["choices() handles missing model_info gracefully"] = function()
+  local result = child.lua([[
+    local get_models = require("inliber.adapters.http.ollama.get_models")
+    local Curl = require("plenary.curl")
+
+    local tags_body = vim.json.encode({
+      models = { { name = "custom:latest" } },
+    })
+    local show_body = vim.json.encode({
+      capabilities = { "completion" },
+      details = {
+        family = "custom",
+      },
+    })
+
+    Curl.get = function(url, opts)
+      if opts.callback then
+        opts.callback({ status = 200, body = tags_body })
+      end
+    end
+    Curl.post = function(url, opts)
+      if opts.callback then
+        opts.callback({ status = 200, body = show_body })
+      end
+    end
+
+    local adapter = require("inliber.adapters.http").extend("ollama", {
+      schema = {
+        model = {
+          default = "custom:latest",
+          choices = { "custom:latest" },
+        },
+      },
+    })
+
+    return get_models.choices(adapter, { async = false })
+  ]])
+
+  h.eq(nil, result["custom:latest"].meta)
+  h.eq("custom:latest", result["custom:latest"].formatted_name)
+end
+
+return T

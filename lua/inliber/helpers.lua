@@ -1,0 +1,43 @@
+local M = {}
+
+---Create and show a diff in a floating window
+---@param args { from_lines: string[], to_lines: string[], ft: string, banner?: string, skip_default_keymaps?: boolean, chat_bufnr?: number, inline?: boolean, tool_name?: string, title?: string, diff_id: number, marker_add?: string, marker_delete?: string, bufnr?: number, keymaps?: { on_accept?: fun(diff_ui: Inliber.DiffUI), on_always_accept?: fun(diff_ui: Inliber.DiffUI), on_reject?: fun(diff_ui: Inliber.DiffUI) } }
+---@return Inliber.DiffUI
+function M.show_diff(args)
+  local bufnr = args.bufnr
+  if args.inline and not bufnr then
+    bufnr = vim.api.nvim_get_current_buf()
+  end
+
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then
+    bufnr = vim.api.nvim_create_buf(false, true)
+  end
+
+  if args.ft then
+    local safe_ft = require("inliber.utils").safe_filetype(args.ft)
+    vim.api.nvim_set_option_value("filetype", safe_ft, { buf = bufnr })
+  end
+
+  local diff = require("inliber.diff").create({
+    bufnr = bufnr,
+    ft = args.ft,
+    from_lines = args.from_lines,
+    to_lines = args.to_lines,
+    marker_add = args.marker_add,
+    marker_delete = args.marker_delete,
+    inline = args.inline,
+  })
+
+  return require("inliber.diff.ui").show(diff, {
+    banner = args.banner,
+    chat_bufnr = args.chat_bufnr,
+    diff_id = args.diff_id,
+    inline = args.inline or false,
+    keymaps = args.keymaps,
+    skip_default_keymaps = args.skip_default_keymaps,
+    title = args.title,
+    tool_name = args.tool_name,
+  })
+end
+
+return M

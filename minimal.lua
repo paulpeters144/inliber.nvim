@@ -1,0 +1,94 @@
+---@diagnostic disable: missing-fields
+
+--[[
+NOTE: Set the config path to enable the copilot adapter to work.
+It will search the following paths for a token:
+  - "$INLIBER_TOKEN_PATH/github-copilot/hosts.json"
+  - "$INLIBER_TOKEN_PATH/github-copilot/apps.json"
+--]]
+vim.env["INLIBER_TOKEN_PATH"] = vim.fn.expand("~/.config")
+
+vim.env.LAZY_STDPATH = ".repro"
+load(vim.fn.system("curl -s https://raw.githubusercontent.com/folke/lazy.nvim/main/bootstrap.lua"))()
+
+-- Your Inliber setup
+local plugins = {
+  {
+    "paulpeters144/inliber.nvim",
+    -- Test with local version (delete if not required):
+    --   dir = "~/Code/Neovim/inliber.nvim/fix-a",
+    --   name = "inliber",
+    dependencies = {
+      { "nvim-lua/plenary.nvim" },
+      {
+        "nvim-treesitter/nvim-treesitter",
+        lazy = false,
+        build = ":TSUpdate",
+      },
+
+      -- Test with blink.cmp
+      {
+        "saghen/blink.cmp",
+        version = "1.*",
+        opts = {
+          keymap = {
+            preset = "enter",
+            ["<S-Tab>"] = { "select_prev", "fallback" },
+            ["<Tab>"] = { "select_next", "fallback" },
+          },
+          cmdline = { sources = { "cmdline" } },
+          sources = {
+            default = { "lsp", "path", "buffer" },
+          },
+        },
+      },
+
+      -- Or, test with nvim-cmp
+      -- { "hrsh7th/nvim-cmp" },
+    },
+    opts = {
+      --Refer to: https://github.com/paulpeters144/inliber.nvim/blob/main/lua/inliber/config.lua
+      interactions = {
+        --NOTE: Change the adapter as required
+        inline = { adapter = "copilot" },
+      },
+      opts = {
+        log_level = "DEBUG",
+      },
+    },
+  },
+}
+
+-- Leaving this comment in to see if the issue author notices ;-)
+-- This is so I can tell if they've really tested with their own minimal.lua file
+-- or if they're just copy-pasting from the docs and pasting it into the issue
+
+require("lazy.minit").repro({ spec = plugins })
+
+-- CONFIGURE PLUGINS HERE -----------------------------------------------------
+
+-- Setup Tree-sitter
+-- NOTE: Please restart Neovim to ensure parsers are loaded correctly
+require("nvim-treesitter")
+  .install({
+    "lua",
+    "markdown",
+    "markdown_inline",
+    "yaml",
+  }, { summary = true, max_jobs = 10 })
+  :wait(1800000)
+
+-- Setup nvim-cmp
+-- local cmp_status, cmp = pcall(require, "cmp")
+-- if cmp_status then
+--   cmp.setup({
+--     mapping = cmp.mapping.preset.insert({
+--       ["<C-b>"] = cmp.mapping.scroll_docs(-4),
+--       ["<C-f>"] = cmp.mapping.scroll_docs(4),
+--       ["<C-Space>"] = cmp.mapping.complete(),
+--       ["<C-e>"] = cmp.mapping.abort(),
+--       ["<CR>"] = cmp.mapping.confirm({ select = true }),
+--       -- Accept currently selected item. Set `select` to `false` to only confirm explicitly selected items.
+--     }),
+--   })
+-- end

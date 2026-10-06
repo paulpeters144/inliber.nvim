@@ -1,0 +1,1 @@
+data: {"candidates":[{"content":{"parts":[{"thought":true,"text":"I should search for the README file..."},{"functionCall":{"name":"file_search","args":{"query":"README.md"},"id":"abc123"},"thoughtSignature":"Ev0BCvoBAb4"}],"role":"model"}}],"usageMetadata":{"promptTokenCount":5171,"candidatesTokenCount":18,"totalTokenCount":5239}}
