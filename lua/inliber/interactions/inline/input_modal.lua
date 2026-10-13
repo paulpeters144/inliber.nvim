@@ -42,7 +42,7 @@ function InputModal:prompt(on_submit, opts)
     height = 3,
     ft = "markdown",
     ignore_keymaps = true,
-    opts = { number = false, relativenumber = false },
+    opts = { number = false, relativenumber = false, wrap = true, linebreak = true },
   })
   self.bufnr = bufnr
   self.winnr = winnr

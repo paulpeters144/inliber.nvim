@@ -18,7 +18,7 @@ The Inline Interaction - This is where code is applied directly to a Neovim buff
 ---@field lines table Lines in the buffer before the inline changes
 ---@field messages table Non-system messages sent across the conversation
 ---@field opts table
----@field original_content? string[] The original buffer content before LLM changes
+---@field original_region? string[] The lines the diff replaced, restored on reject
 ---@field pos? { line: number, col: number, bufnr: number } Where to place the generated code
 ---@field prompts table The prompts to send to the LLM
 ---@field spinner? Inliber.Spinner Progress feedback while the tool loop runs
@@ -41,6 +41,7 @@ local agent_commands_providers = require("inliber.interactions.shared.agent_comm
 local client = require("inliber.http")
 local config = require("inliber.config")
 local editor_context = require("inliber.interactions.inline.editor_context")
+local editor_state = require("inliber.interactions.inline.editor_state")
 local keymaps = require("inliber.utils.keymaps")
 local log = require("inliber.utils.log")
 local markdown = require("inliber.utils.markdown")
@@ -49,6 +50,8 @@ local utils = require("inliber.utils")
 
 local api = vim.api
 local fmt = string.format
+
+local marks_ns = api.nvim_create_namespace("inliber.inline.marks")
 
 local user_role = config.constants.USER_ROLE
 
@@ -80,44 +83,17 @@ Rules:
 - Include comments if appropriate for the language.
 - Do not output anything except the JSON response]],
 
-  SYSTEM_PROMPT_ASK = [[You are a knowledgeable developer working in the Neovim text editor. You answer the user's questions about the %s code in their active Neovim buffer.
+  SYSTEM_PROMPT_ASK = [[You are a knowledgeable developer working in the Neovim text editor. You answer the user's questions about the %s code they are working on.
 
 Your task:
 - Carefully follow the user's prompt (enclosed in <prompt></prompt> tags).
-- Use any provided code context to inform your response.
-- Output only valid JSON as specified below.
-
-Response schema:
-%s
-
-If you cannot answer, respond with a single-sentence reason in %s, enclosed in error tags:
-{
-  "error": "Reason for not being able to answer the prompt"
-}
+- Use the editor state and any other provided context to inform your response.
+- Reply in plain Markdown, in %s. Your reply is shown to the user exactly as written.
 
 Rules:
-- NEVER write or modify code. Your job is only to answer the user's question.
-- Adhere strictly to the JSON schema.
-- Put your full answer to the user in the "message" field.
-- Do not output anything except the JSON response]],
-
-  RESPONSE_ASK = [[Return your answer in valid JSON matching this schema:
-
-{
-  "type": "object",
-  "required": ["message"],
-  "properties": {
-    "message": { "type": "string" }
-  },
-  "additionalProperties": false
-}
-
-Example:
-
-{
-  "message": "Your full answer to the user's prompt."
-}
-]],
+- NEVER modify the user's code. Your job is only to answer the user's question.
+- Short code snippets are fine when they help explain your answer.
+- If you cannot answer, say why in one sentence.]],
 
   -- Enforced via the adapter's structured outputs when using tools. `error` is
   -- optional so the LLM can still explain why it couldn't answer
@@ -192,6 +168,21 @@ local function code_block(message, filetype, code)
   )
 end
 
+---Get the rows that differ between two versions of a buffer
+---@param opts { from: string[], to: string[] }
+---@return { first: number, from_end: number, to_end: number } 0-based first row and exclusive end rows
+local function get_changed_rows(opts)
+  local first = 0
+  while first < #opts.from and first < #opts.to and opts.from[first + 1] == opts.to[first + 1] do
+    first = first + 1
+  end
+  local from_end, to_end = #opts.from, #opts.to
+  while from_end > first and to_end > first and opts.from[from_end] == opts.to[to_end] do
+    from_end, to_end = from_end - 1, to_end - 1
+  end
+  return { first = first, from_end = from_end, to_end = to_end }
+end
+
 ---Overwrite the given selection in the buffer with an empty string
 ---@param context table The buffer context in the inline class
 local function overwrite_selection(context)
@@ -223,6 +214,9 @@ local Inline = {}
 
 ---@type Inliber.Inline|nil The last ask conversation retained for resume
 local last_ask = nil
+
+---@type table<number, Inliber.Inline[]> The requests waiting on the LLM in each buffer
+local running_requests = {}
 
 ---Store an ask conversation for later resume
 ---@param inline Inliber.Inline
@@ -374,6 +368,11 @@ function Inline:prompt(user_prompt)
   -- Add system prompt first
   table.insert(prompts, self:_system_message())
 
+  local editor_state_config = config.interactions.inline.editor_state
+  if editor_state_config.enabled then
+    add_prompt(editor_state.format(self.buffer_context, editor_state_config), user_role, { visible = false })
+  end
+
   -- Followed by prompts from external sources
   local ext_prompts = self:make_ext_prompts()
   if ext_prompts then
@@ -496,9 +495,54 @@ function Inline:make_ext_prompts()
   return prompts
 end
 
+---Get the running request in a buffer whose selection is closest to the cursor
+---@param bufnr number
+---@return Inliber.Inline|nil
+function Inline.get_request_at_cursor(bufnr)
+  local requests = running_requests[bufnr] or {}
+  if #requests < 2 or api.nvim_get_current_buf() ~= bufnr then
+    return requests[#requests]
+  end
+
+  local cursor_line = api.nvim_win_get_cursor(0)[1]
+  local closest, closest_distance
+  for _, request in ipairs(requests) do
+    local start_line, end_line = request:_get_selection_lines()
+    local distance = math.max(start_line - cursor_line, cursor_line - end_line, 0)
+    if not closest_distance or distance < closest_distance then
+      closest, closest_distance = request, distance
+    end
+  end
+  return closest
+end
+
+---Register the request as running and map the stop key in its buffer
+---@return nil
+function Inline:_start_request()
+  local requests = running_requests[self.bufnr] or {}
+  running_requests[self.bufnr] = requests
+  if not vim.tbl_contains(requests, self) then
+    table.insert(requests, self)
+  end
+  self:set_keymaps(self.buffer_context.bufnr, { keymaps = { "stop" } })
+end
+
+---Unregister the request, removing the stop key once no other request runs in the buffer
+---@return nil
+function Inline:_finish_request()
+  local requests = vim.tbl_filter(function(request)
+    return request ~= self
+  end, running_requests[self.bufnr] or {})
+  running_requests[self.bufnr] = requests
+  if #requests == 0 then
+    require("inliber.interactions.inline.keymaps").clear_map(config.interactions.inline.keymaps, self.bufnr)
+  end
+end
+
 ---Stop the current request
 ---@return nil
 function Inline:stop()
+  self:_finish_request()
   local tool_loop = self.tool_loop
   self.tool_loop = nil
   if tool_loop then
@@ -519,11 +563,54 @@ local _streaming = true
 ---@param prompts table The prompts to send to the LLM
 ---@return nil
 function Inline:_submit(prompts)
+  if self.intent == "edit" then
+    self:_track_selection()
+  end
   local tools = config.interactions.inline.tools
   if tools and tools.enabled then
     return self:submit_with_tools(prompts)
   end
   return self:submit(prompts)
+end
+
+---Mark the selected lines so the edit still lands on them if other edits move them
+---@return nil
+function Inline:_track_selection()
+  local context = self.buffer_context
+  self.selection_mark = api.nvim_buf_set_extmark(context.bufnr, marks_ns, context.start_line - 1, 0, {
+    end_row = context.end_line - 1,
+    end_col = 0,
+    end_right_gravity = true,
+  })
+end
+
+---Get the lines the selection covers now, following any edits made since it was marked
+---@return number, number
+function Inline:_get_selection_lines()
+  local context = self.buffer_context
+  if self.selection_mark then
+    local mark = api.nvim_buf_get_extmark_by_id(context.bufnr, marks_ns, self.selection_mark, { details = true })
+    if mark[1] then
+      return mark[1] + 1, mark[3].end_row + 1
+    end
+  end
+  return context.start_line, context.end_line
+end
+
+---Move the selection to wherever its lines are now
+---@return nil
+function Inline:_update_selection()
+  self.buffer_context.start_line, self.buffer_context.end_line = self:_get_selection_lines()
+end
+
+---Delete the extmarks this edit placed in the buffer
+---@return nil
+function Inline:_clear_marks()
+  for _, mark in ipairs({ self.selection_mark, self.region_mark }) do
+    pcall(api.nvim_buf_del_extmark, self.buffer_context.bufnr, marks_ns, mark)
+  end
+  self.selection_mark = nil
+  self.region_mark = nil
 end
 
 ---Run the prompt through the headless tool loop
@@ -535,7 +622,7 @@ function Inline:submit_with_tools(prompts)
   -- Remember the adapter's streaming setting so reset() restores it unchanged
   _streaming = self.adapter.opts and self.adapter.opts.stream
 
-  self:set_keymaps(self.buffer_context.bufnr, { keymaps = { "stop" } })
+  self:_start_request()
   self:_start_spinner("Inliber")
 
   local messages = self:_prepare_tool_messages(prompts)
@@ -552,6 +639,7 @@ function Inline:submit_with_tools(prompts)
           if self.tool_loop ~= loop then
             return
           end
+          log:debug("[Inline] Tool loop finished with %s, messages:\n%s", result, loop.messages)
           local content
           if result and result.status == CONSTANTS.STATUS_SUCCESS then
             content = loop:last_llm_message()
@@ -620,9 +708,9 @@ end
 ---@return string
 function Inline:_system_prompt()
   if self.intent == "ask" then
-    return CONSTANTS.SYSTEM_PROMPT_ASK
+    return fmt(CONSTANTS.SYSTEM_PROMPT_ASK, self.buffer_context.filetype, config.opts.language)
   end
-  return CONSTANTS.SYSTEM_PROMPT
+  return fmt(CONSTANTS.SYSTEM_PROMPT, self.buffer_context.filetype, CONSTANTS.RESPONSE_EDIT, config.opts.language)
 end
 
 ---Build the system message for the current intent
@@ -630,12 +718,7 @@ end
 function Inline:_system_message()
   return {
     role = config.constants.SYSTEM_ROLE,
-    content = fmt(
-      self:_system_prompt(),
-      self.buffer_context.filetype,
-      self:_response_schema(),
-      config.opts.language
-    ),
+    content = self:_system_prompt(),
     _meta = {
       tag = "system_tag",
     },
@@ -667,15 +750,19 @@ end
 ---@param prompts table The original prompts
 ---@return table Messages suitable for the tool loop
 function Inline:_prepare_tool_messages(prompts)
+  -- Asking for JSON alongside tools makes models send their answer through an invented tool call
+  if self.intent == "ask" then
+    return prompts
+  end
+
   local json_instruction = fmt(
     [[
 
 IMPORTANT: After gathering any context you need, you MUST respond with ONLY valid JSON in this format:
 %s
 
-Do not include markdown, code fences, or explanations outside the JSON.
-Write the JSON as your final text reply. Do not call a tool to produce it; only call the tools you were given.]],
-    self:_response_schema()
+Do not include markdown, code fences, or explanations outside the JSON.]],
+    CONSTANTS.RESPONSE_EDIT
   )
 
   local result = {}
@@ -703,7 +790,7 @@ function Inline:submit(prompt)
   _streaming = self.adapter.opts.stream
   self.adapter.opts.stream = false
 
-  self:set_keymaps(self.buffer_context.bufnr, { keymaps = { "stop" } })
+  self:_start_request()
 
   self.current_request = client
     .new({ adapter = self.adapter:map_schema_to_params(), user_args = { event = "InlineStarted" } })
@@ -712,7 +799,7 @@ function Inline:submit(prompt)
       ---@param data table
       ---@param adapter Inliber.HTTPAdapter The modified adapter from the http client
       callback = function(err, data, adapter)
-        require("inliber.interactions.inline.keymaps").clear_map(config.interactions.inline.keymaps, self.bufnr)
+        self:_finish_request()
 
         local function error(msg)
           log:error("[Inline] Request failed with error %s", msg)
@@ -754,34 +841,18 @@ function Inline:done(output)
     return self:_restore_ask_float()
   end
 
+  if self.intent == "ask" then
+    return self:_record_answer(vim.trim(output))
+  end
+
   local json = self:parse_output(output)
   if not json then
     -- Logging is done in parse_output
-    self:reset()
-    return self:_restore_ask_float()
+    return self:reset()
   end
-  if json and json.error then
+  if json.error then
     log:error("[%s] %s", adapter_name, json.error)
-    self:reset()
-    return self:_restore_ask_float()
-  end
-
-  -- An ask intent only ever answers the prompt; the LLM cannot edit the buffer
-  if self.intent == "ask" then
-    local answer = json and json.message
-    self:reset()
-    if not answer or answer == "" then
-      log:error("[%s] Returned no answer", adapter_name)
-      return self:_restore_ask_float()
-    end
-    table.insert(self.messages, { role = config.constants.LLM_ROLE, content = answer })
-    table.insert(self.turns, {
-      question = self.current_question,
-      answer = answer,
-      asked_at = self.current_asked_at,
-      answered_at = os.date("%H:%M"),
-    })
-    return self:_show_answer(self.tokens or tokens.get_tokens(self.messages))
+    return self:reset()
   end
 
   local placement = json and json.placement
@@ -797,6 +868,7 @@ function Inline:done(output)
   end
 
   vim.schedule(function()
+    self:_update_selection()
     if not config.display.diff.enabled or placement == "new" then
       self:place(placement)
       pcall(vim.cmd.undojoin)
@@ -814,6 +886,25 @@ function Inline:done(output)
       code = json.code,
     })
   end)
+end
+
+---Record the LLM's plain-text answer as a turn and show it
+---@param answer string
+---@return nil
+function Inline:_record_answer(answer)
+  self:reset()
+  if answer == "" then
+    log:error("[%s] Returned no answer", self.adapter.formatted_name)
+    return self:_restore_ask_float()
+  end
+  table.insert(self.messages, { role = config.constants.LLM_ROLE, content = answer })
+  table.insert(self.turns, {
+    question = self.current_question,
+    answer = answer,
+    asked_at = self.current_asked_at,
+    answered_at = os.date("%H:%M"),
+  })
+  return self:_show_answer(self.tokens or tokens.get_tokens(self.messages))
 end
 
 ---Show the ask conversation in the chat float
@@ -867,6 +958,7 @@ end
 ---Reset the inline prompt class
 ---@return nil
 function Inline:reset()
+  self:_finish_request()
   self.adapter.opts.stream = _streaming
   self.current_request = nil
   self:_stop_spinner()
@@ -877,6 +969,7 @@ function Inline:reset()
       tool_loop:close()
     end)
   end
+  self:_clear_marks()
   api.nvim_clear_autocmds({ group = self.aug })
 end
 
@@ -973,6 +1066,7 @@ function Inline:parse_output(output)
     end
   end
 
+  log:debug("[Inline] Unparsable response:\n%s", output)
   return log:error("[Inline] Failed to parse the response")
 end
 
@@ -1102,9 +1196,6 @@ function Inline:start_diff(args)
     return self:reset()
   end
 
-  -- Store original content for potential restoration on reject
-  self.original_content = args.original_content
-
   -- Show the inline diff - this will transform the buffer from original to new
   local helpers = require("inliber.helpers")
   self.diff_ui = helpers.show_diff({
@@ -1127,13 +1218,29 @@ function Inline:start_diff(args)
       end,
     },
   })
+  self:_track_region(args)
+end
+
+---Mark the lines the diff changed so a reject restores only those
+---@param args { original_content: string[], new_content: string[] }
+---@return nil
+function Inline:_track_region(args)
+  local rows = get_changed_rows({ from = args.original_content, to = args.new_content })
+  self.original_region = vim.list_slice(args.original_content, rows.first + 1, rows.from_end)
+  -- The inline diff adds a spacer line above a hunk that starts on the first line
+  local offset = self.diff_ui.inline_spacer_mark and 1 or 0
+  self.region_mark = api.nvim_buf_set_extmark(self.buffer_context.bufnr, marks_ns, rows.first + offset, 0, {
+    end_row = rows.to_end + offset,
+    end_col = 0,
+    strict = false,
+  })
 end
 
 ---Handle diff accepted event
 ---@return nil
 function Inline:on_diff_accepted()
   log:trace("[Inline] Diff accepted for id=%s", self.id)
-  self.original_content = nil
+  self.original_region = nil
   self.diff_ui = nil
   self:reset()
 end
@@ -1143,11 +1250,15 @@ end
 function Inline:on_diff_rejected()
   log:trace("[Inline] Diff rejected for id=%s, restoring original content", self.id)
 
-  if self.original_content and api.nvim_buf_is_valid(self.buffer_context.bufnr) then
-    api.nvim_buf_set_lines(self.buffer_context.bufnr, 0, -1, false, self.original_content)
+  local bufnr = self.buffer_context.bufnr
+  if self.original_region and api.nvim_buf_is_valid(bufnr) then
+    local mark = api.nvim_buf_get_extmark_by_id(bufnr, marks_ns, self.region_mark, { details = true })
+    if mark[1] then
+      api.nvim_buf_set_lines(bufnr, mark[1], mark[3].end_row, false, self.original_region)
+    end
   end
 
-  self.original_content = nil
+  self.original_region = nil
   self.diff_ui = nil
   self:reset()
 end

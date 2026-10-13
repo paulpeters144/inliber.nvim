@@ -79,6 +79,13 @@ local defaults = {
       path = "tools.builtin.get_diagnostics",
       description = "Get LSP diagnostics for a given file",
     },
+    ["get_editor_state"] = {
+      path = "tools.builtin.get_editor_state",
+      description = "List open buffers, windows and tabs, or read a buffer's contents",
+      opts = {
+        max_lines = 2000,
+      },
+    },
     ["grep_search"] = {
       path = "tools.builtin.grep_search",
       enabled = function()
@@ -144,7 +151,14 @@ local defaults = {
         enabled = false, -- Run the tool loop before responding?
         ---Read-only tools loaded for the "ask" intent
         ---@type string[]
-        ask_tools = { "read_file", "grep_search", "file_search", "get_diagnostics", "get_changed_files" },
+        ask_tools = {
+          "read_file",
+          "grep_search",
+          "file_search",
+          "get_diagnostics",
+          "get_changed_files",
+          "get_editor_state",
+        },
         ---Read and write tools loaded for the "edit" intent
         ---@type string[]
         edit_tools = {
@@ -153,6 +167,7 @@ local defaults = {
           "file_search",
           "get_diagnostics",
           "get_changed_files",
+          "get_editor_state",
           "create_file",
           "delete_file",
           "insert_edit_into_file",
@@ -181,6 +196,10 @@ local defaults = {
           index = 4,
           modes = { n = "q" },
         },
+      },
+      editor_state = {
+        enabled = true, -- Send the current file, cursor and surrounding code with every prompt?
+        max_lines = 300, -- Send the whole buffer up to this size, otherwise only the visible lines
       },
       editor_context = {
         ["buffer"] = {

@@ -40,7 +40,9 @@ local function resolve_diff(diff_ui, opts)
 
   diff_ui:clear()
   diff_ui:close()
-  clear_map(config.interactions.shared.keymaps, diff_ui.bufnr)
+  if #require("inliber.diff.ui").get_diffs(diff_ui.bufnr) == 0 then
+    clear_map(config.interactions.shared.keymaps, diff_ui.bufnr)
+  end
 
   return true
 end

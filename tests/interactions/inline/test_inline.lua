@@ -43,6 +43,7 @@ T["Inline"] = new_set({
           interactions = {
             inline = {
               adapter = "test_adapter",
+              editor_state = { enabled = false },
             },
           },
         })
@@ -138,9 +139,26 @@ T["Inline"]["uses the ask system prompt when the intent is ask"] = function()
   ]])
 
   local system_prompt = child.lua([[return _G.submitted_prompts[1].content]])
-  h.eq(true, system_prompt:find("NEVER write or modify code", 1, true) ~= nil)
-  h.eq(true, system_prompt:find('"message"', 1, true) ~= nil)
-  h.eq(false, system_prompt:find('"placement"', 1, true) ~= nil)
+  h.eq(true, system_prompt:find("NEVER modify the user's code", 1, true) ~= nil)
+  h.eq(false, system_prompt:find("JSON", 1, true) ~= nil)
+end
+
+T["Inline"]["DOES NOT ask for JSON in the tool loop WHEN the intent is ask"] = function()
+  local content = child.lua([[
+    inline.intent = "ask"
+    return inline:_prepare_tool_messages({ { role = "user", content = "<prompt>why?</prompt>" } })[1].content
+  ]])
+
+  h.eq("<prompt>why?</prompt>", content)
+end
+
+T["Inline"]["asks for JSON in the tool loop WHEN the intent is edit"] = function()
+  local content = child.lua([[
+    inline.intent = "edit"
+    return inline:_prepare_tool_messages({ { role = "user", content = "<prompt>fix it</prompt>" } })[1].content
+  ]])
+
+  h.expect_contains('"placement"', content)
 end
 
 T["Inline"]["reply resends the full conversation history"] = function()
@@ -179,7 +197,7 @@ T["Inline"]["records the answer and turn when the intent is ask"] = function()
     inline.intent = "ask"
     inline.current_question = "what does this do?"
     inline.current_asked_at = "10:00"
-    inline:done('{"message": "it prints"}')
+    inline:done("it prints\n")
   ]])
 
   local recorded = child.lua([[return _G.recorded]])
@@ -363,6 +381,23 @@ T["Inline"]["generates correct prompt structure"] = function()
   h.eq(submitted_prompts[2].content, "<prompt>Test prompt</prompt>")
 end
 
+T["Inline"]["sends the editor state before the prompt WHEN enabled"] = function()
+  child.lua([[
+    _G.submitted_prompts = {}
+    function inline:submit(prompts)
+      _G.submitted_prompts = prompts
+    end
+
+    require("inliber.config").interactions.inline.editor_state.enabled = true
+    inline:prompt("Test prompt")
+  ]])
+
+  local submitted_prompts = child.lua([[return _G.submitted_prompts]])
+  h.eq(3, #submitted_prompts)
+  h.expect_contains("<editor_state>", submitted_prompts[2].content)
+  h.eq("<prompt>Test prompt</prompt>", submitted_prompts[3].content)
+end
+
 T["Inline"]["the first word can be an adapter"] = function()
   child.lua([[
     _G.submitted_prompts = {}
@@ -439,6 +474,145 @@ T["Inline"]["clears the stop keymap as soon as the request completes"] = functio
   h.eq(false, has_stop_keymap)
 
   child.lua([[require("inliber.http").new = _G.original_http_new]])
+end
+
+---Start two edits in one buffer and land their answers, the lower edit asked first
+local function start_two_edits()
+  child.lua([[
+    local api = vim.api
+    local lines = {}
+    for i = 1, 10 do
+      lines[i] = "line " .. i
+    end
+    api.nvim_buf_set_lines(0, 0, -1, false, lines)
+
+    local function start_edit(start_line, end_line)
+      local edit = require("inliber.interactions.inline").new({
+        intent = "edit",
+        buffer_context = {
+          bufnr = api.nvim_get_current_buf(),
+          winnr = api.nvim_get_current_win(),
+          filetype = "lua",
+          start_line = start_line,
+          end_line = end_line,
+          start_col = 1,
+          end_col = 2147483647,
+        },
+      })
+      edit:_track_selection()
+      return edit
+    end
+
+    local function answer(edit, code)
+      edit:done(vim.json.encode({ code = code, language = "lua", placement = "replace" }))
+      vim.wait(50)
+    end
+
+    _G.lower_edit = start_edit(8, 8)
+    _G.upper_edit = start_edit(3, 3)
+    answer(_G.upper_edit, "upper 1\nupper 2\nupper 3")
+    answer(_G.lower_edit, "lower")
+  ]])
+end
+
+T["Inline"]["edits the selected lines AFTER an earlier edit moves them"] = function()
+  start_two_edits()
+
+  local lines = child.lua([[return vim.api.nvim_buf_get_lines(0, 0, -1, false)]])
+  h.eq({ "line 1", "line 2", "upper 1", "upper 2", "upper 3", "line 4" }, vim.list_slice(lines, 1, 6))
+  h.eq({ "line 7", "lower", "line 9" }, vim.list_slice(lines, 9, 11))
+end
+
+T["Inline"]["DOES NOT undo another edit WHEN rejecting a diff"] = function()
+  start_two_edits()
+
+  local lines = child.lua([[
+    _G.upper_edit.diff_ui.keymaps.on_reject()
+    return vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  ]])
+  h.eq({ "line 1", "line 2", "line 3", "line 4", "line 5", "line 6", "line 7", "lower", "line 9", "line 10" }, lines)
+end
+
+T["Inline"]["accepts the diff nearest the cursor WHEN a buffer has two"] = function()
+  start_two_edits()
+
+  local resolved = child.lua([[
+    vim.api.nvim_win_set_cursor(0, { 10, 0 })
+    local accept = require("inliber.config").interactions.shared.keymaps.accept_change.modes.n
+    vim.api.nvim_feedkeys(accept, "x", false)
+    return { upper = _G.upper_edit.diff_ui ~= nil, lower = _G.lower_edit.diff_ui ~= nil }
+  ]])
+  h.eq({ upper = true, lower = false }, resolved)
+end
+
+---Start two requests in one buffer that wait on the LLM until stopped
+local function start_two_requests()
+  child.lua([[
+    local api = vim.api
+    local lines = {}
+    for i = 1, 10 do
+      lines[i] = "line " .. i
+    end
+    api.nvim_buf_set_lines(0, 0, -1, false, lines)
+
+    _G.cancelled = {}
+    require("inliber.http").new = function()
+      return {
+        request = function(_, _, _, opts)
+          return {
+            cancel = function()
+              table.insert(_G.cancelled, opts.buffer_context.start_line)
+            end,
+          }
+        end,
+      }
+    end
+
+    local function start_request(line)
+      local request = require("inliber.interactions.inline").new({
+        intent = "edit",
+        buffer_context = {
+          bufnr = api.nvim_get_current_buf(),
+          winnr = api.nvim_get_current_win(),
+          filetype = "lua",
+          start_line = line,
+          end_line = line,
+          start_col = 1,
+          end_col = 2147483647,
+        },
+      })
+      request:_submit({ { role = "user", content = "<prompt>edit</prompt>" } })
+    end
+
+    start_request(2)
+    start_request(9)
+  ]])
+end
+
+---Press the stop key with the cursor on a line
+local function press_stop(line)
+  child.lua(string.format(
+    [[
+      vim.api.nvim_win_set_cursor(0, { %d, 0 })
+      vim.api.nvim_feedkeys(require("inliber.config").interactions.inline.keymaps.stop.modes.n, "x", false)
+    ]],
+    line
+  ))
+end
+
+T["Inline"]["stops the request nearest the cursor WHEN a buffer has two"] = function()
+  start_two_requests()
+  press_stop(1)
+
+  h.eq({ 2 }, child.lua([[return _G.cancelled]]))
+end
+
+T["Inline"]["DOES NOT remove the stop key WHILE another request runs"] = function()
+  start_two_requests()
+  press_stop(1)
+  press_stop(1)
+
+  h.eq({ 2, 9 }, child.lua([[return _G.cancelled]]))
 end
 
 T["Inline"]["Inline.remember and Inline.last_ask round-trip the instance"] = function()

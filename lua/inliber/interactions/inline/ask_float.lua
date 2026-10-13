@@ -10,6 +10,7 @@ local api = vim.api
 
 local SPINNER_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
 local SPINNER_INTERVAL_MS = 100
+local MIN_TEXT_ROWS = 8
 local WINBAR = " <CR> ask · q close "
 
 ---@class Inliber.AskFloat.Config
@@ -20,11 +21,13 @@ local WINBAR = " <CR> ask · q close "
 ---@field ask_separator? string Separator between the conversation and the input line
 
 ---@class Inliber.AskFloat
+---@field answer_row? number The buffer row of the latest answer's speaker label
 ---@field bufnr? number The buffer holding the float's content
 ---@field winnr? number The current floating window
 ---@field frame number The current spinner frame
 ---@field max_width number The float's max width in columns
 ---@field on_submit? fun(question: string) Callback for a submitted question
+---@field overflows boolean Whether the conversation is taller than the window
 ---@field pending_question? string The question awaiting an answer
 ---@field pending_asked_at? string The time the pending question was asked
 ---@field show_timestamps boolean Whether to show the time next to each speaker
@@ -50,6 +53,7 @@ function AskFloat.new(opts)
       return " (" .. tokens .. " tokens)"
     end,
     ask_separator = opts.ask_separator or "──── ask ────",
+    overflows = false,
     thinking = false,
     turns = {},
   }, { __index = AskFloat })
@@ -69,20 +73,22 @@ end
 ---Render the conversation turns as markdown lines
 ---@param turns table[] The conversation turns
 ---@param show_timestamps boolean Whether to append the time to each speaker label
----@return string[]
+---@return string[], number|nil
 local function render_turns(turns, show_timestamps)
   local lines = {}
+  local answer_row
   for _, turn in ipairs(turns) do
     table.insert(lines, speaker_label("You", show_timestamps and turn.asked_at))
     table.insert(lines, "")
     vim.list_extend(lines, vim.split(turn.question or "", "\n"))
     table.insert(lines, "")
     table.insert(lines, speaker_label("Inliber", show_timestamps and turn.answered_at))
+    answer_row = #lines
     table.insert(lines, "")
     vim.list_extend(lines, vim.split(turn.answer or "", "\n"))
     table.insert(lines, "")
   end
-  return lines
+  return lines, answer_row
 end
 
 ---Show the conversation in the chat float, creating the window on first use
@@ -100,13 +106,13 @@ function AskFloat:show(opts)
   self:_stop_spinner()
 
   if self:_valid() then
-    self:_resize(self:_content_width())
+    self:_resize({ width = self:_content_width() })
   else
     self:close()
     local bufnr, winnr = ui_utils.create_float({ "" }, {
       title = "Inliber",
       width = self:_content_width(),
-      height = math.floor(vim.o.lines * 0.9),
+      height = MIN_TEXT_ROWS + 1,
       ft = "markdown",
       ignore_keymaps = true,
       winbar = WINBAR,
@@ -118,7 +124,11 @@ function AskFloat:show(opts)
 
   self:_render()
   self:_set_keymaps()
-  self:focus_input()
+  if self.overflows and self.answer_row then
+    self:_focus_answer()
+  else
+    self:focus_input()
+  end
 end
 
 ---Show a pending question with a thinking indicator and lock the input
@@ -144,6 +154,16 @@ function AskFloat:focus_input()
   if not self.thinking then
     vim.cmd("startinsert!")
   end
+end
+
+---Scroll the latest answer to the top of the window, in normal mode
+---@return nil
+function AskFloat:_focus_answer()
+  api.nvim_set_current_win(self.winnr)
+  vim.cmd("stopinsert")
+  api.nvim_win_call(self.winnr, function()
+    vim.fn.winrestview({ lnum = self.answer_row, col = 0, topline = self.answer_row })
+  end)
 end
 
 ---Close the float and release its buffer
@@ -180,9 +200,9 @@ function AskFloat:_token_str()
 end
 
 ---Render the conversation, plus the pending question and spinner while thinking
----@return string[]
+---@return string[], number|nil
 function AskFloat:_conversation_lines()
-  local lines = render_turns(self.turns, self.show_timestamps)
+  local lines, answer_row = render_turns(self.turns, self.show_timestamps)
   if self.thinking and self.pending_question then
     table.insert(lines, speaker_label("You", self.show_timestamps and self.pending_asked_at))
     table.insert(lines, "")
@@ -193,7 +213,7 @@ function AskFloat:_conversation_lines()
     table.insert(lines, SPINNER_FRAMES[self.frame] .. " Thinking…")
     table.insert(lines, "")
   end
-  return lines
+  return lines, answer_row
 end
 
 ---Compute the float width from the conversation content
@@ -206,35 +226,47 @@ function AskFloat:_content_width()
   return math.min(width, self.max_width)
 end
 
----Resize and recenter the window to fit the conversation
----@param width number
+---Resize and recenter the window, keeping the dimensions not given
+---@param opts { width?: number, height?: number }
 ---@return nil
-function AskFloat:_resize(width)
-  if not self:_valid() then
-    return
-  end
+function AskFloat:_resize(opts)
   local win_config = api.nvim_win_get_config(self.winnr)
-  win_config.width = width
-  win_config.col = math.floor((vim.o.columns - width) / 2)
+  win_config.width = opts.width or win_config.width
+  win_config.height = opts.height or win_config.height
+  win_config.col = math.floor((vim.o.columns - win_config.width) / 2)
+  win_config.row = math.floor((vim.o.lines - win_config.height) / 2 - 1)
   api.nvim_win_set_config(self.winnr, win_config)
 end
 
----Build the buffer content: conversation, then an input line pinned to the bottom
+---Build the buffer content: conversation, then the input line
 ---@return string[]
 function AskFloat:_build_lines()
-  local lines = self:_conversation_lines()
+  local lines, answer_row = self:_conversation_lines()
+  self.answer_row = answer_row
 
   if #self.turns > 0 then
     table.insert(lines, self.ask_separator)
   end
-
-  local height = api.nvim_win_get_height(self.winnr)
-  for _ = 1, math.max(0, height - #lines - 1) do
-    table.insert(lines, "")
-  end
   table.insert(lines, "")
 
   return lines
+end
+
+---Fit the window to the wrapped conversation and pad it so the input line sits at the bottom
+---@return nil
+function AskFloat:_fit_height()
+  -- Wrapped lines and virtual lines from markdown plugins take extra rows, so measure screen rows
+  local text_rows = api.nvim_win_text_height(self.winnr, {}).all
+  local max_text_rows = math.floor(vim.o.lines * 0.9) - 1
+  local window_rows = math.max(MIN_TEXT_ROWS, math.min(text_rows, max_text_rows))
+  self.overflows = text_rows > window_rows
+
+  local last = api.nvim_buf_line_count(self.bufnr)
+  local padding = vim.fn["repeat"]({ "" }, math.max(0, window_rows - text_rows))
+  api.nvim_buf_set_lines(self.bufnr, last - 1, last - 1, false, padding)
+
+  -- The window height includes the winbar row
+  self:_resize({ height = window_rows + 1 })
 end
 
 ---Write the content to the buffer
@@ -244,9 +276,9 @@ function AskFloat:_render()
     return
   end
 
-  local lines = self:_build_lines()
   api.nvim_set_option_value("modifiable", true, { buf = self.bufnr })
-  api.nvim_buf_set_lines(self.bufnr, 0, -1, false, lines)
+  api.nvim_buf_set_lines(self.bufnr, 0, -1, false, self:_build_lines())
+  self:_fit_height()
   api.nvim_set_option_value("modifiable", not self.thinking, { buf = self.bufnr })
 
   -- Show token count in the winbar (unaffected by markdown plugins)

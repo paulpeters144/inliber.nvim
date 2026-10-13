@@ -27,6 +27,9 @@ local M = {}
 local DiffUI = {}
 DiffUI.__index = DiffUI
 
+---@type table<number, Inliber.DiffUI[]> The unresolved diffs in each buffer
+local active_diffs = {}
+
 -- Cache for computed values that depend only on config
 local _cached_default_banner = nil
 
@@ -100,11 +103,24 @@ local function banner_virt_text(bufnr, opts)
   return ns_id
 end
 
+---Get the rows a hunk covers, following any edits made since the diff was shown
+---@param hunk table
+---@return number, number The start row and the row after the hunk (0-based)
+function DiffUI:get_hunk_rows(hunk)
+  if hunk.mark then
+    local mark = api.nvim_buf_get_extmark_by_id(self.bufnr, self.ns, hunk.mark, { details = true })
+    if mark[1] then
+      return mark[1], mark[3].end_row or mark[1]
+    end
+  end
+  return hunk.pos[1], hunk.pos[1]
+end
+
 ---Navigate to next hunk
 ---@param line number
 function DiffUI:next_hunk(line)
   for index, hunk in ipairs(self.diff.hunks) do
-    local hunk_line = hunk.pos[1] + 1
+    local hunk_line = self:get_hunk_rows(hunk) + 1
     if hunk_line > line then
       self.current_hunk = index
       ui_utils.scroll_to_line(self.bufnr, hunk_line)
@@ -115,7 +131,7 @@ function DiffUI:next_hunk(line)
   -- Wrap around to first hunk
   if #self.diff.hunks > 0 then
     self.current_hunk = 1
-    local hunk_line = self.diff.hunks[1].pos[1] + 1
+    local hunk_line = self:get_hunk_rows(self.diff.hunks[1]) + 1
     ui_utils.scroll_to_line(self.bufnr, hunk_line)
     return utils.fire("DiffHunkChanged", { id = self.diff_id, bufnr = self.bufnr })
   end
@@ -127,7 +143,7 @@ end
 function DiffUI:previous_hunk(line)
   for i = #self.diff.hunks, 1, -1 do
     local hunk = self.diff.hunks[i]
-    local hunk_line = hunk.pos[1] + 1
+    local hunk_line = self:get_hunk_rows(hunk) + 1
     if hunk_line < line then
       self.current_hunk = i
       ui_utils.scroll_to_line(self.bufnr, hunk_line)
@@ -138,7 +154,7 @@ function DiffUI:previous_hunk(line)
   -- Wrap around to last hunk
   if #self.diff.hunks > 0 then
     self.current_hunk = #self.diff.hunks
-    local hunk_line = self.diff.hunks[#self.diff.hunks].pos[1] + 1
+    local hunk_line = self:get_hunk_rows(self.diff.hunks[#self.diff.hunks]) + 1
     ui_utils.scroll_to_line(self.bufnr, hunk_line)
     return utils.fire("DiffHunkChanged", { id = self.diff_id, bufnr = self.bufnr })
   end
@@ -161,7 +177,7 @@ end
 ---@return nil
 function DiffUI:_set_keymap(mode, lhs, handler)
   vim.keymap.set(mode, lhs, function()
-    handler.callback(self)
+    handler.callback(M.get_diff_at_cursor(self.bufnr) or self)
   end, {
     buffer = self.bufnr,
     desc = handler.desc,
@@ -275,6 +291,10 @@ end
 ---Clear diff extmarks from buffer
 ---@return nil
 function DiffUI:clear()
+  active_diffs[self.bufnr] = vim.tbl_filter(function(diff_ui)
+    return diff_ui ~= self
+  end, active_diffs[self.bufnr] or {})
+
   if self.aug_group then
     pcall(api.nvim_del_augroup_by_id, self.aug_group)
   end
@@ -396,6 +416,10 @@ function DiffUI:apply_inline(diff, bufnr)
       target_row = 0
     end
     hunk.pos = { target_row, 0 }
+    hunk.mark = api.nvim_buf_set_extmark(bufnr, self.ns, target_row, 0, {
+      end_row = math.min(target_row + hunk.to_count, line_count),
+      end_col = 0,
+    })
   end
 end
 
@@ -458,7 +482,7 @@ end
 ---@return number group Autocommand group ID
 local function setup_banner(diff_ui, opts)
   local bufnr = diff_ui.bufnr
-  local group = api.nvim_create_augroup("inliber.diff_window_" .. bufnr, { clear = true })
+  local group = api.nvim_create_augroup("inliber.diff_window_" .. diff_ui.diff_id, { clear = true })
   diff_ui.aug_group = group
 
   local function show_banner(args)
@@ -474,7 +498,7 @@ local function setup_banner(diff_ui, opts)
     end
 
     local hunk = diff_ui.diff.hunks[diff_ui.current_hunk]
-    local target_line = opts.inline and hunk and hunk.pos[1] or nil
+    local target_line = opts.inline and hunk and diff_ui:get_hunk_rows(hunk) or nil
 
     local ns_id = banner_virt_text(bufnr, {
       banner = opts.banner,
@@ -499,7 +523,7 @@ local function setup_banner(diff_ui, opts)
     pattern = "InliberDiffHunkChanged",
     group = group,
     callback = function(event)
-      if event.data.bufnr ~= bufnr then
+      if event.data.id ~= diff_ui.diff_id then
         return
       end
       show_banner({ overwrite = true })
@@ -538,7 +562,7 @@ local function setup_close_handler(diff_ui, group, skip_default_keymaps)
 
   -- Auto-reject on premature close (only if using default keymaps)
   if not skip_default_keymaps then
-    vim.api.nvim_clear_autocmds({ buffer = bufnr, event = "WinClosed" })
+    vim.api.nvim_clear_autocmds({ group = group, buffer = bufnr, event = "WinClosed" })
     api.nvim_create_autocmd("WinClosed", {
       group = group,
       buffer = bufnr,
@@ -562,6 +586,36 @@ end
 ---@field skip_default_keymaps? boolean
 ---@field title? string
 ---@field tool_name? string
+
+---Get the unresolved diffs in a buffer
+---@param bufnr number
+---@return Inliber.DiffUI[]
+function M.get_diffs(bufnr)
+  return active_diffs[bufnr] or {}
+end
+
+---Get the unresolved diff in a buffer whose hunks are closest to the cursor
+---@param bufnr number
+---@return Inliber.DiffUI|nil
+function M.get_diff_at_cursor(bufnr)
+  local diffs = M.get_diffs(bufnr)
+  if #diffs < 2 or api.nvim_get_current_buf() ~= bufnr then
+    return diffs[#diffs]
+  end
+
+  local cursor_row = api.nvim_win_get_cursor(0)[1] - 1
+  local closest, closest_distance
+  for _, diff_ui in ipairs(diffs) do
+    for _, hunk in ipairs(diff_ui.diff.hunks) do
+      local start_row, end_row = diff_ui:get_hunk_rows(hunk)
+      local distance = math.max(start_row - cursor_row, cursor_row - math.max(end_row - 1, start_row), 0)
+      if not closest_distance or distance < closest_distance then
+        closest, closest_distance = diff_ui, distance
+      end
+    end
+  end
+  return closest
+end
 
 ---Show a diff in a floating window
 ---@param diff CC.Diff The diff object from diff.create()
@@ -607,11 +661,13 @@ function M.show(diff, opts)
     diff_ui:apply_extmarks(diff, bufnr)
   end
   diff_ui:setup_keymaps({ skip_default_keymaps = opts.skip_default_keymaps or false })
+  active_diffs[bufnr] = active_diffs[bufnr] or {}
+  table.insert(active_diffs[bufnr], diff_ui)
 
   -- Scroll to first hunk
   if #diff.hunks > 0 then
     vim.schedule(function()
-      ui_utils.scroll_to_line(bufnr, diff.hunks[1].pos[1] + 1)
+      ui_utils.scroll_to_line(bufnr, diff_ui:get_hunk_rows(diff.hunks[1]) + 1)
     end)
   end
 

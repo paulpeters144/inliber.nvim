@@ -1,4 +1,3 @@
-local config = require("inliber.config")
 local log = require("inliber.utils.log")
 
 local M = {}
@@ -18,8 +17,8 @@ end
 
 M.stop = {
   callback = function(inline)
-    inline:stop()
-    M.clear_map(config.interactions.inline.keymaps, inline.bufnr)
+    local request = require("inliber.interactions.inline").get_request_at_cursor(inline.bufnr) or inline
+    request:stop()
     log:trace("[Inline] Cancelling the request")
   end,
 }

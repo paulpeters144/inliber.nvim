@@ -48,6 +48,7 @@ function Tools:_handle_tool_error(tool, error_message)
   tool_call.function_call = tool_call
 
   log:error(error_message)
+  log:debug("[Tools] Rejected tool call: %s", tool)
 
   local available_tools_msg = ""
   if self.host and self.host.registry and self.host.registry.in_use then
