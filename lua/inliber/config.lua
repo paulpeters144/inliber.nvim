@@ -8,29 +8,22 @@ local constants = {
 
 local defaults = {
   adapters = {
-    http = {
-      anthropic = "anthropic",
-      azure_openai = "azure_openai",
-      copilot = "copilot",
-      deepseek = "deepseek",
-      gemini = "gemini",
-      gemini_interactions = "gemini_interactions",
-      githubmodels = "githubmodels",
-      huggingface = "huggingface",
-      kimi = "kimi",
-      novita = "novita",
-      mistral = "mistral",
-      ollama = "ollama",
-      openai = "openai",
-      openai_responses = "openai_responses",
-      openrouter = "openrouter",
-      xai = "xai",
-      extend = nil, -- Per-adapter overrides keyed by config key e.g. { openai = { env = { api_key = "ABC-123" } } }
+    acp = {
+      auggie_cli = "auggie_cli",
+      cagent = "cagent",
+      claude_code = "claude_code",
+      cline_cli = "cline_cli",
+      codex = "codex",
+      copilot_acp = "copilot_acp",
+      cursor_cli = "cursor_cli",
+      gemini_cli = "gemini_cli",
+      goose = "goose",
+      kimi_cli = "kimi_cli",
+      kiro = "kiro",
+      mistral_vibe = "mistral_vibe",
+      opencode = "opencode",
+      extend = nil, -- Per-adapter overrides keyed by config key e.g. { codex = { env = { OPENAI_API_KEY = "ABC-123" } } }
       opts = {
-        allow_insecure = false, -- Allow insecure connections?
-        cache_models_for = 1800, -- Cache adapter models for this long (seconds)
-        hidden = {},
-        proxy = nil, -- [protocol://]host[:port] e.g. socks5://127.0.0.1:9999
         show_presets = true, -- Show preset adapters
       },
     },
@@ -41,142 +34,13 @@ local defaults = {
 
   constants = constants,
 
-  tools = {
-    -- Tools
-    ["create_file"] = {
-      path = "tools.builtin.create_file",
-      description = "Create a file in the current working directory",
-      opts = {
-        require_approval_before = false,
-        require_confirmation_after = true,
-      },
-    },
-    ["delete_file"] = {
-      path = "tools.builtin.delete_file",
-      description = "Delete a file in the current working directory",
-      opts = {
-        judge = false,
-        protect = true,
-        require_approval_before = true,
-        require_cmd_approval = true,
-      },
-    },
-    ["file_search"] = {
-      path = "tools.builtin.file_search",
-      description = "Search for files in the current working directory by glob pattern",
-      opts = {
-        max_results = 500,
-      },
-    },
-    ["get_changed_files"] = {
-      path = "tools.builtin.get_changed_files",
-      description = "Get git diffs of current file changes in a git repository",
-      opts = {
-        max_lines = 1000,
-      },
-    },
-    ["get_diagnostics"] = {
-      path = "tools.builtin.get_diagnostics",
-      description = "Get LSP diagnostics for a given file",
-    },
-    ["get_editor_state"] = {
-      path = "tools.builtin.get_editor_state",
-      description = "List open buffers, windows and tabs, or read a buffer's contents",
-      opts = {
-        max_lines = 2000,
-      },
-    },
-    ["grep_search"] = {
-      path = "tools.builtin.grep_search",
-      enabled = function()
-        -- Currently this tool only supports ripgrep
-        return vim.fn.executable("rg") == 1
-      end,
-      description = "Search for text in the current working directory",
-      opts = {
-        max_results = 100,
-        respect_gitignore = true,
-        require_approval_before = true,
-      },
-    },
-    ["insert_edit_into_file"] = {
-      path = "tools.builtin.insert_edit_into_file",
-      description = "Robustly edit existing files with multiple automatic fallback interactions",
-      opts = {
-        require_approval_before = { -- Require approval before the tool is executed?
-          buffer = false, -- For editing buffers in Neovim
-          file = false, -- For editing files in the current working directory
-        },
-        require_confirmation_after = true, -- Require confirmation from the user before accepting the edit?
-        file_size_limit_mb = 2, -- Maximum file size in MB
-      },
-    },
-    ["read_file"] = {
-      path = "tools.builtin.read_file",
-      description = "Read a file in the current working directory",
-      opts = {
-        require_approval_before = true,
-      },
-    },
-    ["run_command"] = {
-      path = "tools.builtin.run_command",
-      description = "Run shell commands initiated by the LLM",
-      opts = {
-        judge = false,
-        require_approval_before = true,
-        require_cmd_approval = true,
-        safe_commands = { "git status", "ls", "pwd" }, -- Commands which run without asking in auto mode
-        timeout = 300000, -- Timeout for commands (milliseconds) - 5 mins by default
-      },
-    },
-    opts = {
-      ---The approval mode every chat buffer starts in
-      ---@type Inliber.Tools.ApprovalMode
-      approval_mode = "ask",
-      auto_submit_errors = true, -- Send any errors to the LLM automatically?
-      auto_submit_success = true, -- Send any successful output to the LLM automatically?
-      max_output_tokens = 30000, -- Truncate a tool's output above this many tokens, or the model's limit if lower
-      notify_on_approval = true, -- Notify the user when a tool requires approval?,
-    },
-  },
-
   interactions = {
     opts = {
       date_format = "%A, %d %B %Y", -- The date format to use in system prompts
     },
     -- INLINE INTERACTION -----------------------------------------------------
     inline = {
-      adapter = "copilot",
-      tools = {
-        enabled = false, -- Run the tool loop before responding?
-        ---Read-only tools loaded for the "ask" intent
-        ---@type string[]
-        ask_tools = {
-          "read_file",
-          "grep_search",
-          "file_search",
-          "get_diagnostics",
-          "get_changed_files",
-          "get_editor_state",
-        },
-        ---Read and write tools loaded for the "edit" intent
-        ---@type string[]
-        edit_tools = {
-          "read_file",
-          "grep_search",
-          "file_search",
-          "get_diagnostics",
-          "get_changed_files",
-          "get_editor_state",
-          "create_file",
-          "delete_file",
-          "insert_edit_into_file",
-          "run_command",
-        },
-        opts = {
-          approval_mode = "auto", -- ask|auto|yolo
-        },
-      },
+      adapter = "copilot_acp",
       input_modal = {
         input_width = 60, -- Width of the input modal in columns
       },
@@ -383,37 +247,6 @@ local function remove_disabled_keymaps(keymaps)
   return enabled
 end
 
----Move the yolo mode tool options over to their approval mode equivalents
----@param tools table
-local function migrate_yolo_tool_opts(tools)
-  local warned = {}
-  ---@param opts { legacy: string, replacement: string }
-  local function warn(opts)
-    if not warned[opts.legacy] then
-      warned[opts.legacy] = true
-      vim.notify(
-        ("[Inliber] The `%s` tool option is deprecated. Use `%s` instead."):format(opts.legacy, opts.replacement),
-        vim.log.levels.WARN,
-        { title = "Inliber" }
-      )
-    end
-  end
-
-  for _, tool in pairs(tools) do
-    local opts = type(tool) == "table" and type(tool.opts) == "table" and tool.opts or {}
-    if opts.allowed_in_yolo_mode ~= nil then
-      warn({ legacy = "allowed_in_yolo_mode", replacement = "protect" })
-      opts.protect = not opts.allowed_in_yolo_mode
-      opts.allowed_in_yolo_mode = nil
-    end
-    if opts.judge_in_yolo_mode ~= nil then
-      warn({ legacy = "judge_in_yolo_mode", replacement = "judge" })
-      opts.judge = opts.judge_in_yolo_mode
-      opts.judge_in_yolo_mode = nil
-    end
-  end
-end
-
 ---@param args? table
 M.setup = function(args)
   args = vim.deepcopy(args or {})
@@ -440,8 +273,6 @@ M.setup = function(args)
   if project_config then
     M.config = vim.tbl_deep_extend("force", M.config, project_config)
   end
-
-  migrate_yolo_tool_opts(M.config.tools)
 end
 
 ---Determine if code can be sent to the LLM

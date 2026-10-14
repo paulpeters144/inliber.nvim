@@ -33,12 +33,13 @@ The full style guide, with worked examples:
 
 Core: `lua/inliber/`
 
-- **Interactions** (`interactions/`): `chat/`, `inline/`, `cmd.lua`, `init.lua` (workflows)
-- **Adapters** (`adapters/`): `http/` (Anthropic, OpenAI, Copilot, Ollama, Gemini, etc.), `acp/` (Claude Code, Codex, etc.)
-- **Tools** (`interactions/chat/tools/builtin/`): `ask_questions`, `run_command`, `read_file`, `create_file`, `delete_file`, `insert_edit_into_file/`, `grep_search`, `file_search`, `web_search`, `fetch_webpage`, `memory`, `get_changed_files`, `get_diagnostics`, `cmd_tool` (factory for custom command tools)
-- **Slash Commands** (`interactions/chat/slash_commands/builtin/`): `/buffer`, `/command`, `/compact`, `/fetch`, `/file`, `/help`, `/image`, `/mcp`, `/mode`, `/now`, `/rules`, `/symbols`
-- **Editor Context** (`interactions/chat/editor_context/`): `buffer`, `buffers`, `diagnostics`, `diff`, `messages`, `quickfix`, `selection`, `terminal`, `viewport`
-- **Config:** `config.lua` - tool groups (`agent`, `files`), adapter defaults, all settings
+- **Interactions** (`interactions/`): `inline/` — the only interaction (ask float, input modal, diff flow, ACP submit)
+- **ACP** (`acp/`): `init.lua` (Connection), `prompt_builder.lua`, `fs.lua`, `methods.lua` — JSON-RPC 2.0 over stdio to agent CLIs
+- **Adapters** (`adapters/acp/`): `init.lua` (ACPAdapter), `helpers.lua`, 13 preset adapters (copilot_acp, claude_code, opencode, codex, ...)
+- **One-shot requests** (`interactions/shared/acp_request.lua`): connection pooling and message shaping for the inline interaction
+- **Agent commands** (`interactions/shared/agent_commands/`): discovery, completion and expansion of `@command` tags (claude_code, opencode providers)
+- **Editor Context** (`interactions/inline/editor_context/`): `buffer`, `clipboard`
+- **Config:** `config.lua` - adapter presets, inline settings, display options
 - **Entry point:** `plugin/inliber.lua` → `lua/inliber/init.lua`
 
 ## General rules
@@ -46,14 +47,13 @@ Core: `lua/inliber/`
 - Don't over-explore the codebase with excessive grep/read calls. If you haven't converged on an approach after 3-4 searches, pause and share what you've found so far rather than continuing to search.
 - When the user asks to fix tests, fix the tests - not the source code - unless explicitly asked otherwise.
 - If you're working with directories or files, utilise the functions in `inliber/utils/files.lua` ensuring you join paths with `vim.fs.joinpath`
-- Never read `adapter.schema.model.default` directly - it holds a function on Ollama and any `openai_compatible` adapter. `adapter_utils.model(adapter)` gives the model as a string without ever calling that function; `adapter_utils.resolve_model(adapter)` calls it for the places that need the value and can afford the HTTP round-trip it may cost. Both return `string|nil`
-- To change an adapter's model, `adapters.set_model({ adapter = adapter, model = "gpt-4o" })`, or `adapters.resolve(name, { model = "gpt-4o" })` when starting from an adapter name. Don't assign the schema yourself
+- To change an adapter's model, `adapters.resolve(name, { model = "gpt-4o" })` — it lands in `defaults.session_config_options.model` and is applied to the session via `session/set_config_option`. On a live connection, `adapters.set_model({ acp_connection = conn, model = "gpt-4o" })`. Don't assign the adapter table yourself
 
 ### Testing
 
-- `make test_file FILE=` takes a single file (`tests/interactions/code_review/test_ui.lua`), never a directory. Run one file per invocation
+- `make test_file FILE=` takes a single file (e.g. `tests/acp/test_acp.lua`), never a directory. Run one file per invocation
 - When running `make test_file` tests, do not append `| tail -12` or similar to filter the output. This prevents the user's rules governing what can be auto-accepted, from applying
-- Chat buffer cursor position, scrolling and folds are verified by hand in real use. Don't add test cases for them, even alongside a fix. Ask first
+- Float cursor position, scrolling and folds are verified by hand in real use. Don't add test cases for them, even alongside a fix. Ask first
 - Test the behaviour, not the obvious. A case that only proves a guard clause returns `false`, or that a value passes through a shared utility unchanged, earns nothing - cut it and keep the cases where the outcome could genuinely go either way
 - Name a case for the behaviour it pins down, and lean on contrast so a pair reads as a pair: `DOES NOT truncate a tool that is INSIDE the limit` / `truncates a tool that is OUTSIDE the limit`
 

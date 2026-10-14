@@ -8,8 +8,6 @@ local ui_utils = require("inliber.utils.ui")
 
 local api = vim.api
 
-local SPINNER_FRAMES = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
-local SPINNER_INTERVAL_MS = 100
 local MIN_TEXT_ROWS = 8
 local WINBAR = " <CR> ask · q close "
 
@@ -24,7 +22,7 @@ local WINBAR = " <CR> ask · q close "
 ---@field answer_row? number The buffer row of the latest answer's speaker label
 ---@field bufnr? number The buffer holding the float's content
 ---@field winnr? number The current floating window
----@field frame number The current spinner frame
+---@field input_row? number The buffer row where the input line starts
 ---@field max_width number The float's max width in columns
 ---@field on_submit? fun(question: string) Callback for a submitted question
 ---@field overflows boolean Whether the conversation is taller than the window
@@ -35,7 +33,6 @@ local WINBAR = " <CR> ask · q close "
 ---@field token_count fun(tokens: number): string Formats the token count
 ---@field ask_separator string Separator between the conversation and the input line
 ---@field thinking boolean Whether the float is waiting on a response
----@field timer? uv.uv_timer_t The timer driving the thinking spinner
 ---@field tokens? number The cumulative token count to display
 ---@field turns table[] The conversation turns being rendered
 local AskFloat = {}
@@ -45,7 +42,6 @@ local AskFloat = {}
 function AskFloat.new(opts)
   opts = opts or config.interactions.inline.ask_float or {}
   return setmetatable({
-    frame = 1,
     max_width = opts.answer_max_width or 110,
     show_timestamps = opts.show_timestamps ~= false,
     show_token_count = opts.show_token_count ~= false,
@@ -82,7 +78,7 @@ local function render_turns(turns, show_timestamps)
     table.insert(lines, "")
     vim.list_extend(lines, vim.split(turn.question or "", "\n"))
     table.insert(lines, "")
-    table.insert(lines, speaker_label("Inliber", show_timestamps and turn.answered_at))
+    table.insert(lines, speaker_label("Agent", show_timestamps and turn.answered_at))
     answer_row = #lines
     table.insert(lines, "")
     vim.list_extend(lines, vim.split(turn.answer or "", "\n"))
@@ -103,14 +99,13 @@ function AskFloat:show(opts)
   end
   self.thinking = false
   self.pending_question = nil
-  self:_stop_spinner()
 
   if self:_valid() then
     self:_resize({ width = self:_content_width() })
   else
     self:close()
     local bufnr, winnr = ui_utils.create_float({ "" }, {
-      title = "Inliber",
+      title = "Agent",
       width = self:_content_width(),
       height = MIN_TEXT_ROWS + 1,
       ft = "markdown",
@@ -131,7 +126,7 @@ function AskFloat:show(opts)
   end
 end
 
----Show a pending question with a thinking indicator and lock the input
+---Show a pending question and lock the input while the answer arrives
 ---@param question string The question awaiting an answer
 ---@return nil
 function AskFloat:set_thinking(question)
@@ -139,7 +134,6 @@ function AskFloat:set_thinking(question)
   self.pending_question = question
   self.pending_asked_at = os.date("%H:%M")
   self:_render()
-  self:_start_spinner()
 end
 
 ---Move the cursor to the input line and enter insert mode
@@ -169,7 +163,6 @@ end
 ---Close the float and release its buffer
 ---@return nil
 function AskFloat:close()
-  self:_stop_spinner()
   vim.cmd("stopinsert")
   if self.winnr and api.nvim_win_is_valid(self.winnr) then
     pcall(api.nvim_win_close, self.winnr, true)
@@ -199,7 +192,7 @@ function AskFloat:_token_str()
   return self.token_count(self.tokens)
 end
 
----Render the conversation, plus the pending question and spinner while thinking
+---Render the conversation, plus the pending question while thinking
 ---@return string[], number|nil
 function AskFloat:_conversation_lines()
   local lines, answer_row = render_turns(self.turns, self.show_timestamps)
@@ -208,9 +201,7 @@ function AskFloat:_conversation_lines()
     table.insert(lines, "")
     vim.list_extend(lines, vim.split(self.pending_question, "\n"))
     table.insert(lines, "")
-    table.insert(lines, speaker_label("Inliber"))
-    table.insert(lines, "")
-    table.insert(lines, SPINNER_FRAMES[self.frame] .. " Thinking…")
+    table.insert(lines, speaker_label("Agent"))
     table.insert(lines, "")
   end
   return lines, answer_row
@@ -279,6 +270,7 @@ function AskFloat:_render()
   api.nvim_set_option_value("modifiable", true, { buf = self.bufnr })
   api.nvim_buf_set_lines(self.bufnr, 0, -1, false, self:_build_lines())
   self:_fit_height()
+  self.input_row = api.nvim_buf_line_count(self.bufnr)
   api.nvim_set_option_value("modifiable", not self.thinking, { buf = self.bufnr })
 
   -- Show token count in the winbar (unaffected by markdown plugins)
@@ -309,48 +301,20 @@ function AskFloat:_set_keymaps()
   end, { buffer = bufnr })
 end
 
----Submit the question on the input line
+---Submit the question from the input line and any pasted lines below it
 ---@return nil
 function AskFloat:_submit_input()
   if self.thinking then
     return
   end
-  local last = api.nvim_buf_line_count(self.bufnr)
-  local question = vim.trim(api.nvim_buf_get_lines(self.bufnr, last - 1, last, false)[1] or "")
+  local lines = api.nvim_buf_get_lines(self.bufnr, self.input_row - 1, -1, false)
+  local question = vim.trim(table.concat(lines, "\n"))
   if question == "" then
     return
   end
   local on_submit = self.on_submit
   if on_submit then
     on_submit(question)
-  end
-end
-
----Start the thinking spinner animation
----@return nil
-function AskFloat:_start_spinner()
-  self:_stop_spinner()
-  self.timer = vim.uv.new_timer()
-  self.timer:start(
-    0,
-    SPINNER_INTERVAL_MS,
-    vim.schedule_wrap(function()
-      if not self.thinking or not self:_valid() then
-        return self:_stop_spinner()
-      end
-      self.frame = (self.frame % #SPINNER_FRAMES) + 1
-      self:_render()
-    end)
-  )
-end
-
----Stop the thinking spinner animation
----@return nil
-function AskFloat:_stop_spinner()
-  if self.timer then
-    self.timer:stop()
-    self.timer:close()
-    self.timer = nil
   end
 end
 

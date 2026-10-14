@@ -1,1 +1,0 @@
-data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"weather_with_default","args":{},"id":"call_1"}},{"functionCall":{"name":"weather_with_default","args":{"location":"Paris","units":"celsius"},"id":"call_2"}}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":504,"candidatesTokenCount":38,"totalTokenCount":542}}

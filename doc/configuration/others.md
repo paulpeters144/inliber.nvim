@@ -1,22 +1,8 @@
 ---
-description: "Configure miscellaneous Inliber options: response language, log level, per-project config files, and restricting code from being sent to LLMs."
+description: "Configure miscellaneous Inliber options: log level, per-project config files, and restricting code from being sent to agents."
 ---
 
 # Other Configuration Options
-
-## Language
-
-If you use the default system prompt, you can specify which language an LLM should respond in by changing the `opts.language` option:
-
-```lua
-require("inliber").setup({
-  opts = {
-    language = "English",
-  },
-}),
-```
-
-Of course, if you have your own system prompt you can specify your own language for the LLM to respond in.
 
 ## Log Level
 
@@ -63,11 +49,8 @@ require("inliber").setup({
       paths = {
         ["~/Code/Python/New-Startup"] = {
           interactions = {
-            chat = {
-              adapter = {
-                name = "copilot",
-                model = "claude-opus-4.6",
-              },
+            inline = {
+              adapter = "opencode",
             },
           },
         },
@@ -84,18 +67,8 @@ File-based configuration must return a valid Lua table. For example:
 ```lua
 return {
   interactions = {
-    chat = {
-      adapter = {
-        name = "copilot",
-        model = "claude-sonnet-4.6",
-      },
-      tools = {
-        opts = {
-          default_tools = {
-            "memory",
-          },
-        },
-      },
+    inline = {
+      adapter = "claude_code",
     },
   },
 }
@@ -104,9 +77,9 @@ return {
 ## Sending Code
 
 > [!IMPORTANT]
-> Whilst the plugin makes every attempt to prevent code from being sent to the LLM, use this option at your own risk
+> Whilst the plugin makes every attempt to prevent code from being sent to the agent, use this option at your own risk
 
-You can prevent any code from being sent to the LLM with:
+You can prevent any code from being sent to the agent with:
 
 ```lua
 require("inliber").setup({
@@ -123,7 +96,7 @@ Inliber registers a few keymaps when it's set up:
 | Keymap | Action |
 |---|---|
 | `<leader>aa` | Ask, answering in a floating window |
-| `<leader>ae` | Edit, never answering in a chat buffer |
+| `<leader>ae` | Edit, in the current buffer |
 | `<leader>ar` | Resume the last ask conversation |
 
 You can override them with a list of keymaps. Each entry takes a left-hand side, a right-hand side, a `mode` and a `desc`:
@@ -137,7 +110,7 @@ require("inliber").setup({
       { "<leader>ar", "<cmd>InliberAskResume<cr>", mode = "n", desc = "Resume Ask" },
     },
   },
-}),
+})
 ```
 
 Set the option to `false` to register none of them:
@@ -149,4 +122,3 @@ require("inliber").setup({
   },
 }),
 ```
-

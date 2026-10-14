@@ -4,7 +4,7 @@ The Inline Interaction - This is where code is applied directly to a Neovim buff
 
 ---@class Inliber.Inline
 ---@field id number The ID of the inline prompt
----@field adapter Inliber.HTTPAdapter The adapter to use for the inline prompt
+---@field adapter Inliber.ACPAdapter The adapter to use for the inline prompt
 ---@field ask_float? Inliber.AskFloat The persistent float holding the ask conversation
 ---@field input_modal? Inliber.InputModal The input modal collecting the prompt
 ---@field aug number The ID for the autocmd group
@@ -12,7 +12,7 @@ The Inline Interaction - This is where code is applied directly to a Neovim buff
 ---@field bufnr number The buffer number to apply the inline edits to
 ---@field current_asked_at? string The time the current question was asked
 ---@field current_question? string The question of the current ask turn
----@field current_request? table The current request that's being processed
+---@field current_request? { cancel: fun() } The current request that's being processed
 ---@field diff_ui? Inliber.DiffUI The diff UI instance
 ---@field intent "ask"|"edit" Whether the prompt answers a question or edits the buffer
 ---@field lines table Lines in the buffer before the inline changes
@@ -21,13 +21,11 @@ The Inline Interaction - This is where code is applied directly to a Neovim buff
 ---@field original_region? string[] The lines the diff replaced, restored on reject
 ---@field pos? { line: number, col: number, bufnr: number } Where to place the generated code
 ---@field prompts table The prompts to send to the LLM
----@field spinner? Inliber.Spinner Progress feedback while the tool loop runs
----@field tool_loop? Inliber.ToolLoop The tool loop driving the request
----@field tokens? number The cumulative token count reported by the adapter
+---@field spinner? Inliber.Spinner Progress feedback while the request runs
 ---@field turns table Rendered question/answer pairs for the ask float
 
 ---@class Inliber.InlineArgs
----@field adapter? Inliber.HTTPAdapter
+---@field adapter? Inliber.ACPAdapter
 ---@field buffer_context? Inliber.BufferContext
 ---@field intent "ask"|"edit" Whether the prompt answers a question or edits the buffer
 ---@field lines? table The lines in the buffer before the inline changes
@@ -35,10 +33,10 @@ The Inline Interaction - This is where code is applied directly to a Neovim buff
 ---@field pre_hook? fun():number Function to run before the inline prompt is started
 ---@field prompts? table The prompts to send to the LLM
 
+local acp_request = require("inliber.interactions.shared.acp_request")
 local adapters = require("inliber.adapters")
 local agent_commands = require("inliber.interactions.shared.agent_commands")
 local agent_commands_providers = require("inliber.interactions.shared.agent_commands.providers")
-local client = require("inliber.http")
 local config = require("inliber.config")
 local editor_context = require("inliber.interactions.inline.editor_context")
 local editor_state = require("inliber.interactions.inline.editor_state")
@@ -57,99 +55,35 @@ local user_role = config.constants.USER_ROLE
 
 local CONSTANTS = {
   AUTOCMD_GROUP = "inliber.inline",
-  STATUS_ERROR = "error",
-  STATUS_SUCCESS = "success",
 
-  SYSTEM_PROMPT = [[You are a knowledgeable developer working in the Neovim text editor. You write %s code on behalf of a user, directly into their active Neovim buffer.
+  -- ACP agents have no server-side JSON mode and are chatty by default, so a
+  -- firm, compact instruction beats a long JSON schema
+  SYSTEM_PROMPT = [[You are writing %s code directly into a Neovim buffer.
 
-Your task:
-- Carefully follow the user's prompt (enclosed in <prompt></prompt> tags).
-- Use any provided code context to inform your response.
-- Output only valid JSON as specified below.
+Reply with ONLY a JSON object. No markdown fences, no prose, no explanation:
 
-Response schema:
 %s
 
-If you cannot answer, respond with a single-sentence reason in %s, enclosed in error tags:
-{
-  "error": "Reason for not being able to answer the prompt"
-}
+If you cannot answer, return {"error": "reason"}.
+Preserve the exact indentation of the code you write.]],
 
-Rules:
-- **CRITICAL**: ENSURE YOU PRESERVE THE EXACT INDENTATION (TABS/SPACES) as it appears in the provided code.
-- Validate all code carefully.
-- Adhere strictly to the JSON schema.
-- Do not include markdown, code fences, or explanations.
-- Include comments if appropriate for the language.
-- Do not output anything except the JSON response]],
+  SYSTEM_PROMPT_ASK = [[You are answering the user's questions about the %s code in their Neovim buffer. Never write or modify code.
 
-  SYSTEM_PROMPT_ASK = [[You are a knowledgeable developer working in the Neovim text editor. You answer the user's questions about the %s code they are working on.
+Reply with ONLY a JSON object. No markdown fences, no prose, no explanation:
 
-Your task:
-- Carefully follow the user's prompt (enclosed in <prompt></prompt> tags).
-- Use the editor state and any other provided context to inform your response.
-- Reply in plain Markdown, in %s. Your reply is shown to the user exactly as written.
+%s
 
-Rules:
-- NEVER modify the user's code. Your job is only to answer the user's question.
-- Short code snippets are fine when they help explain your answer.
-- If you cannot answer, say why in one sentence.]],
+If you cannot answer, return {"error": "reason"}.
+Put your full answer in the "message" field.]],
 
-  -- Enforced via the adapter's structured outputs when using tools. `error` is
-  -- optional so the LLM can still explain why it couldn't answer
-  SCHEMA_ASK = {
-    type = "object",
-    required = { "message" },
-    properties = {
-      message = { type = "string" },
-      error = { type = "string" },
-    },
-    additionalProperties = false,
-  },
+  RESPONSE_ASK = [["message": "<your full answer to the user's question>"]],
 
-  SCHEMA_EDIT = {
-    type = "object",
-    required = { "code", "language", "placement" },
-    properties = {
-      code = { type = "string" },
-      language = { type = "string" },
-      placement = { type = "string", enum = { "replace", "add", "before", "new" } },
-      error = { type = "string" },
-    },
-    additionalProperties = false,
-  },
+  RESPONSE_EDIT = [["code": "<the code>", "language": "<language>", "placement": "<replace|add|before>"
 
-  RESPONSE_EDIT = [[Return your code and placement in valid JSON matching this schema:
-
-{
-  "type": "object",
-  "required": ["code", "language", "placement"],
-  "properties": {
-    "code": { "type": "string" },
-    "language": { "type": "string" },
-    "placement": {
-      "type": "string",
-      "enum": ["replace", "add", "before", "new"],
-      "description": "Where to place the code in Neovim."
-    }
-  },
-  "additionalProperties": false
-}
-
-Placement options:
-- "replace": Replace the user's current visual selection in the buffer with your code.
-- "add": Insert your code after the user's current cursor position in the buffer.
-- "before": Insert your code before the user's current cursor position in the buffer.
-- "new": Create a new Neovim buffer and insert your code there.
-
-Example:
-
-{
-  "code": "print('Hello World')",
-  "language": "python",
-  "placement": "replace"
-}
-]],
+placement:
+- replace: replace the visual selection with "code"
+- add: insert "code" after the cursor
+- before: insert "code" before the cursor]],
 }
 
 ---Format code into a code block alongside a message
@@ -196,8 +130,6 @@ local function overwrite_selection(context)
     context.end_col = line_length
   end
 
-  -- NOTE: Ensure that focus is set to the correct buffer in case the user has navigated away
-  api.nvim_set_current_buf(context.bufnr)
   api.nvim_buf_set_text(
     context.bufnr,
     context.start_line - 1,
@@ -206,7 +138,20 @@ local function overwrite_selection(context)
     context.end_col,
     { "" }
   )
-  api.nvim_win_set_cursor(context.winnr, { context.start_line, context.start_col })
+
+  -- The window may show another buffer by now; only move the cursor if it still shows this one
+  if context.winnr and api.nvim_win_is_valid(context.winnr) and api.nvim_win_get_buf(context.winnr) == context.bufnr then
+    api.nvim_win_set_cursor(context.winnr, { context.start_line, context.start_col })
+  end
+end
+
+---Join the next edit in the given buffer into its previous undo block
+---@param bufnr number
+---@return nil
+local function undojoin(bufnr)
+  api.nvim_buf_call(bufnr, function()
+    pcall(vim.cmd.undojoin)
+  end)
 end
 
 ---@class Inliber.Inline
@@ -268,11 +213,12 @@ function Inline.new(args)
 end
 
 ---Set the adapter for the inline prompt
----@param adapter Inliber.HTTPAdapter|string|function
+---@param adapter Inliber.ACPAdapter|string|function
+---@param opts? { model?: string }
 ---@return nil
-function Inline:set_adapter(adapter)
+function Inline:set_adapter(adapter, opts)
   if not self.adapter or not adapters.resolved(adapter) then
-    self.adapter = adapters.resolve(adapter)
+    self.adapter = adapters.resolve(adapter, opts)
   end
 end
 
@@ -312,7 +258,7 @@ function Inline:parse_special_syntax(prompt)
   local adapter_pattern = "adapter=([%w_]+)"
   local adapter_match = prompt:match(adapter_pattern)
 
-  local config_adapters = config.adapters.http
+  local config_adapters = config.adapters.acp
   if adapter_match then
     if config_adapters[adapter_match] then
       self:set_adapter(adapter_match)
@@ -413,7 +359,7 @@ function Inline:prompt(user_prompt)
 
   self.prompts = prompts
   self.messages = vim.deepcopy(vim.list_slice(prompts, 2))
-  return self:_submit(vim.deepcopy(prompts))
+  return self:submit(vim.deepcopy(prompts))
 end
 
 ---Submit a question, starting or continuing the ask conversation
@@ -443,7 +389,7 @@ function Inline:reply(question)
   end
 
   self.prompts = prompts
-  return self:_submit(vim.deepcopy(prompts))
+  return self:submit(vim.deepcopy(prompts))
 end
 
 ---Prompts can enter the inline class from external sources such as the command
@@ -543,34 +489,12 @@ end
 ---@return nil
 function Inline:stop()
   self:_finish_request()
-  local tool_loop = self.tool_loop
-  self.tool_loop = nil
-  if tool_loop then
-    tool_loop:stop()
-  end
   self:_stop_spinner()
   if self.current_request then
     self.current_request.cancel()
     self.current_request = nil
-    adapters.call_handler(self.adapter, "on_exit")
   end
   self:_restore_ask_float()
-end
-
-local _streaming = true
-
----Route the prompts to either the tool loop or the direct request
----@param prompts table The prompts to send to the LLM
----@return nil
-function Inline:_submit(prompts)
-  if self.intent == "edit" then
-    self:_track_selection()
-  end
-  local tools = config.interactions.inline.tools
-  if tools and tools.enabled then
-    return self:submit_with_tools(prompts)
-  end
-  return self:submit(prompts)
 end
 
 ---Mark the selected lines so the edit still lands on them if other edits move them
@@ -613,89 +537,29 @@ function Inline:_clear_marks()
   self.region_mark = nil
 end
 
----Run the prompt through the headless tool loop
----@param prompts table The prompts to send to the LLM
----@return nil
-function Inline:submit_with_tools(prompts)
-  local tools = config.interactions.inline.tools
-
-  -- Remember the adapter's streaming setting so reset() restores it unchanged
-  _streaming = self.adapter.opts and self.adapter.opts.stream
-
-  self:_start_request()
-  self:_start_spinner("Inliber")
-
-  local messages = self:_prepare_tool_messages(prompts)
-
-  local tool_loop = require("inliber.tools").new({
-    adapter = self.adapter,
-    bufnr = self.buffer_context.bufnr,
-    messages = messages,
-    structured_output = self:_structured_output(),
-    approval_mode = tools.opts and tools.opts.approval_mode,
-    callbacks = {
-      on_completed = function(loop, result)
-        vim.schedule(function()
-          if self.tool_loop ~= loop then
-            return
-          end
-          log:debug("[Inline] Tool loop finished with %s, messages:\n%s", result, loop.messages)
-          local content
-          if result and result.status == CONSTANTS.STATUS_SUCCESS then
-            content = loop:last_llm_message()
-          end
-          if not content then
-            self.tool_loop = nil
-            loop:close()
-            self:reset()
-            return self:_restore_ask_float()
-          end
-          self.tokens = loop.tokens
-          self:done(content)
-        end)
-      end,
-      on_cancelled = function()
-        self:reset()
-        self:_restore_ask_float()
-      end,
-      on_status = function(tool_name, status, label)
-        if self.spinner then
-          self.spinner:update(label or tool_name)
-        end
-      end,
-    },
-  })
-
-  if not tool_loop then
-    return log:error("[Inline] Failed to initiate the request")
-  end
-
-  self:_add_tools(tool_loop)
-
-  self.tool_loop = tool_loop
-  tool_loop:submit()
-end
-
----Add the intent-specific tools to the tool loop's registry
----@param tool_loop Inliber.ToolLoop
----@return nil
-function Inline:_add_tools(tool_loop)
-  local tools = config.interactions.inline.tools
-  local tool_names = self.intent == "ask" and tools.ask_tools or tools.edit_tools
-  for _, tool in ipairs(tool_names or {}) do
-    tool_loop:add_tool(tool)
-  end
-end
-
 ---Start the progress spinner
----@param message string
 ---@return nil
-function Inline:_start_spinner(message)
-  self.spinner = require("inliber.utils.spinner").new({ message = message })
+function Inline:_start_spinner()
+  local intent = self.intent:sub(1, 1):upper() .. self.intent:sub(2)
+  local label = intent
+  local filename = self.buffer_context.filename
+  if filename and filename ~= "" then
+    label = intent .. " · " .. filename
+  end
+  self.spinner = require("inliber.utils.spinner").new({ label = label })
   self.spinner:start()
 end
 
----Stop the progress spinner
+---Finish the progress spinner with a Done row
+---@return nil
+function Inline:_finish_spinner()
+  if self.spinner then
+    self.spinner:finish()
+    self.spinner = nil
+  end
+end
+
+---Remove the progress spinner immediately
 ---@return nil
 function Inline:_stop_spinner()
   if self.spinner then
@@ -708,17 +572,35 @@ end
 ---@return string
 function Inline:_system_prompt()
   if self.intent == "ask" then
-    return fmt(CONSTANTS.SYSTEM_PROMPT_ASK, self.buffer_context.filetype, config.opts.language)
+    return CONSTANTS.SYSTEM_PROMPT_ASK
   end
-  return fmt(CONSTANTS.SYSTEM_PROMPT, self.buffer_context.filetype, CONSTANTS.RESPONSE_EDIT, config.opts.language)
+  return CONSTANTS.SYSTEM_PROMPT
 end
 
 ---Build the system message for the current intent
 ---@return table
 function Inline:_system_message()
+  local content = fmt(self:_system_prompt(), self.buffer_context.filetype, self:_response_schema())
+
+  if self.intent == "edit" then
+    -- The relative path keeps the user's home directory out of the request
+    if self.buffer_context.relative_path and self.buffer_context.relative_path ~= "" then
+      content = content .. "\n\nYou are editing the file: " .. self.buffer_context.relative_path
+    end
+
+    -- With no selection, the LLM must inspect the file itself to decide where
+    -- the edit belongs. ACP agents have their own file tools
+    if not self.buffer_context.is_visual then
+      content = content
+        .. "\n\nNo code was selected. "
+        .. "Inspect the file"
+        .. ", decide where the edit belongs, then return the complete updated file."
+    end
+  end
+
   return {
     role = config.constants.SYSTEM_ROLE,
-    content = self:_system_prompt(),
+    content = content,
     _meta = {
       tag = "system_tag",
     },
@@ -737,93 +619,39 @@ function Inline:_response_schema()
   return CONSTANTS.RESPONSE_EDIT
 end
 
----Get the structured output schema for the current intent
----@return Inliber.StructuredOutput.Schema
-function Inline:_structured_output()
-  if self.intent == "ask" then
-    return { name = "inline_ask", schema = CONSTANTS.SCHEMA_ASK }
-  end
-  return { name = "inline_edit", schema = CONSTANTS.SCHEMA_EDIT }
-end
-
----Prepare messages for the tool loop by appending the JSON format instruction to the user message
----@param prompts table The original prompts
----@return table Messages suitable for the tool loop
-function Inline:_prepare_tool_messages(prompts)
-  -- Asking for JSON alongside tools makes models send their answer through an invented tool call
-  if self.intent == "ask" then
-    return prompts
-  end
-
-  local json_instruction = fmt(
-    [[
-
-IMPORTANT: After gathering any context you need, you MUST respond with ONLY valid JSON in this format:
-%s
-
-Do not include markdown, code fences, or explanations outside the JSON.]],
-    CONSTANTS.RESPONSE_EDIT
-  )
-
-  local result = {}
-  for _, msg in ipairs(prompts) do
-    if msg.role == user_role and msg.content and msg.content:match("</prompt>") then
-      table.insert(result, {
-        role = msg.role,
-        content = msg.content .. json_instruction,
-        _meta = msg._meta,
-        opts = msg.opts,
-      })
-    else
-      table.insert(result, msg)
-    end
-  end
-
-  return result
-end
-
----Submit the prompts to the LLM to process
+---Submit the prompts to an ACP agent for processing
 ---@param prompt table The prompts to send to the LLM
 ---@return nil
 function Inline:submit(prompt)
-  -- Inline editing only works with streaming off - We should remember the current status
-  _streaming = self.adapter.opts.stream
-  self.adapter.opts.stream = false
-
+  if self.intent == "edit" then
+    self:_track_selection()
+  end
   self:_start_request()
+  self:_start_spinner()
+  return self:_submit_acp(prompt)
+end
 
-  self.current_request = client
-    .new({ adapter = self.adapter:map_schema_to_params(), user_args = { event = "InlineStarted" } })
-    :request({ messages = self.adapter:map_roles(prompt) }, {
-      ---@param err string
-      ---@param data table
-      ---@param adapter Inliber.HTTPAdapter The modified adapter from the http client
-      callback = function(err, data, adapter)
-        self:_finish_request()
-
-        local function error(msg)
-          log:error("[Inline] Request failed with error %s", msg)
-        end
-
-        if err then
-          local msg = type(err) == "table" and err.message or err
-          return error(msg)
-        end
-
-        if data then
-          data = adapters.call_handler(adapter, "parse_inline", data, self.buffer_context)
-          if data and data.status == CONSTANTS.STATUS_SUCCESS then
-            return self:done(data.output)
-          elseif data then
-            return error(data.output)
-          end
-        end
-      end,
-    }, {
-      bufnr = self.bufnr,
-      buffer_context = self.buffer_context or {},
-      interaction = "inline",
-    })
+---Submit the prompts through the one-shot ACP request bridge
+---@param prompt table The prompts to send to the agent
+---@return nil
+function Inline:_submit_acp(prompt)
+  utils.fire("InlineStarted")
+  self.current_request = acp_request.submit({
+    purpose = "inline",
+    adapter = self.adapter,
+    messages = self.adapter:map_roles(prompt),
+    bufnr = self.bufnr,
+    on_done = function(output)
+      self:_finish_request()
+      self:done(output)
+    end,
+    on_error = function(err)
+      self:_stop_spinner()
+      self:_finish_request()
+      log:error("[Inline] Request failed with error %s", err)
+      self:_restore_ask_float()
+    end,
+  })
 end
 
 ---Once the request has been completed, we can process the output
@@ -831,7 +659,7 @@ end
 ---@return nil
 function Inline:done(output)
   utils.fire("InlineFinished")
-  self:_stop_spinner()
+  self:_finish_spinner()
 
   local adapter_name = self.adapter.formatted_name
 
@@ -841,18 +669,34 @@ function Inline:done(output)
     return self:_restore_ask_float()
   end
 
-  if self.intent == "ask" then
-    return self:_record_answer(vim.trim(output))
-  end
-
   local json = self:parse_output(output)
   if not json then
     -- Logging is done in parse_output
-    return self:reset()
+    self:reset()
+    return self:_restore_ask_float()
   end
   if json.error then
     log:error("[%s] %s", adapter_name, json.error)
-    return self:reset()
+    self:reset()
+    return self:_restore_ask_float()
+  end
+
+  -- An ask intent only ever answers the prompt; the LLM cannot edit the buffer
+  if self.intent == "ask" then
+    local answer = json and json.message
+    self:reset()
+    if not answer or answer == "" then
+      log:error("[%s] Returned no answer", adapter_name)
+      return self:_restore_ask_float()
+    end
+    table.insert(self.messages, { role = config.constants.LLM_ROLE, content = answer })
+    table.insert(self.turns, {
+      question = self.current_question,
+      answer = answer,
+      asked_at = self.current_asked_at,
+      answered_at = os.date("%H:%M"),
+    })
+    return self:_show_answer(tokens.get_tokens(self.messages))
   end
 
   local placement = json and json.placement
@@ -867,11 +711,28 @@ function Inline:done(output)
     return self:reset()
   end
 
+  -- ACP agents reply with the whole edited file instead of just the changed lines.
+  -- Treat that as a whole-buffer replacement so the file is not pasted inside the
+  -- existing selection or cursor.
+  if self:_is_full_file_rewrite(json.code) then
+    local full = api.nvim_buf_get_lines(self.buffer_context.bufnr, 0, -1, true)
+    self.buffer_context.start_line = 1
+    self.buffer_context.start_col = 0
+    self.buffer_context.end_line = #full
+    self.buffer_context.end_col = #full[#full]
+    placement = "replace"
+  end
+
+  -- ACP agents pick "new" on their own; redirect their code to the current buffer
+  if placement == "new" and json.placement and json.placement:lower() == "new" then
+    placement = self.buffer_context.is_visual and "replace" or "add"
+  end
+
   vim.schedule(function()
     self:_update_selection()
     if not config.display.diff.enabled or placement == "new" then
       self:place(placement)
-      pcall(vim.cmd.undojoin)
+      undojoin(self.buffer_context.bufnr)
       self:output(json.code)
       return self:reset()
     end
@@ -886,25 +747,6 @@ function Inline:done(output)
       code = json.code,
     })
   end)
-end
-
----Record the LLM's plain-text answer as a turn and show it
----@param answer string
----@return nil
-function Inline:_record_answer(answer)
-  self:reset()
-  if answer == "" then
-    log:error("[%s] Returned no answer", self.adapter.formatted_name)
-    return self:_restore_ask_float()
-  end
-  table.insert(self.messages, { role = config.constants.LLM_ROLE, content = answer })
-  table.insert(self.turns, {
-    question = self.current_question,
-    answer = answer,
-    asked_at = self.current_asked_at,
-    answered_at = os.date("%H:%M"),
-  })
-  return self:_show_answer(self.tokens or tokens.get_tokens(self.messages))
 end
 
 ---Show the ask conversation in the chat float
@@ -952,23 +794,15 @@ function Inline:resume(opts)
     return
   end
 
-  return self:_show_answer(self.tokens)
+  return self:_show_answer(tokens.get_tokens(self.messages))
 end
 
 ---Reset the inline prompt class
 ---@return nil
 function Inline:reset()
   self:_finish_request()
-  self.adapter.opts.stream = _streaming
   self.current_request = nil
   self:_stop_spinner()
-  if self.tool_loop then
-    local tool_loop = self.tool_loop
-    self.tool_loop = nil
-    vim.schedule(function()
-      tool_loop:close()
-    end)
-  end
   self:_clear_marks()
   api.nvim_clear_autocmds({ group = self.aug })
 end
@@ -995,7 +829,9 @@ function Inline:get_new_content(original, code, placement)
       start_prefix = result[ctx.start_line]:sub(1, ctx.start_col - 1)
     end
     if result[ctx.end_line] then
-      end_suffix = result[ctx.end_line]:sub(ctx.end_col + 1)
+      -- end_col can be math.maxinteger for a line-wise selection; without the
+      -- clamp, +1 overflows to a negative index and sub() returns the whole line
+      end_suffix = result[ctx.end_line]:sub(math.min(ctx.end_col + 1, #result[ctx.end_line] + 1))
     end
 
     -- Combine prefix with first line and suffix with last line
@@ -1064,10 +900,46 @@ function Inline:parse_output(output)
     if ok then
       return json
     end
+
+    -- ACP agents often answer with fenced raw code instead of the JSON schema
+    if self.adapter.type == "acp" then
+      return {
+        code = markdown_code,
+        language = self.buffer_context.filetype,
+        placement = self.buffer_context.is_visual and "replace" or "add",
+      }
+    end
   end
 
   log:debug("[Inline] Unparsable response:\n%s", output)
   return log:error("[Inline] Failed to parse the response")
+end
+
+---Detect whether the model returned the whole buffer rather than just the changed lines
+---@param code string The code returned by the model
+---@return boolean
+function Inline:_is_full_file_rewrite(code)
+  local buffer_lines = api.nvim_buf_get_lines(self.buffer_context.bufnr, 0, -1, true)
+  -- Normalise line endings so the comparison is indifferent to CRLF output
+  local code_lines = vim.split(code:gsub("\r\n", "\n"):gsub("\r", "\n"), "\n")
+
+  -- A trailing newline adds an empty line that the buffer does not report
+  if #code_lines > 1 and code_lines[#code_lines] == "" then
+    code_lines[#code_lines] = nil
+  end
+
+  if #buffer_lines < 2 or #code_lines < 2 then
+    return false
+  end
+
+  -- A rewrite is comparable in size to the buffer, whereas a snippet is far
+  -- shorter. It also shares a boundary line with the buffer, which a block
+  -- selected from the middle of the file never does.
+  if #code_lines < math.floor(#buffer_lines * 0.5) then
+    return false
+  end
+
+  return code_lines[1] == buffer_lines[1] or code_lines[#code_lines] == buffer_lines[#buffer_lines]
 end
 
 ---Write the output from the LLM to the buffer
@@ -1105,9 +977,8 @@ function Inline:place(placement)
   if placement == "replace" then
     self.lines = api.nvim_buf_get_lines(self.buffer_context.bufnr, 0, -1, true)
     overwrite_selection(self.buffer_context)
-    local cursor_pos = api.nvim_win_get_cursor(self.buffer_context.winnr)
-    pos.line = cursor_pos[1]
-    pos.col = cursor_pos[2]
+    pos.line = self.buffer_context.start_line
+    pos.col = self.buffer_context.start_col
     pos.bufnr = self.buffer_context.bufnr
   elseif placement == "add" then
     self.lines = api.nvim_buf_get_lines(self.buffer_context.bufnr, 0, -1, true)
@@ -1186,12 +1057,12 @@ end
 function Inline:start_diff(args)
   log:debug("[Inline] Starting diff")
 
-  local approvals = require("inliber.tools.approvals")
+  local approvals = require("inliber.interactions.inline.approvals")
 
   -- If the buffer has been added to the auto approval list, skip the diff
   if approvals:is_approved(self.bufnr, { tool_name = "inline" }) then
     self:place(args.placement)
-    pcall(vim.cmd.undojoin)
+    undojoin(self.buffer_context.bufnr)
     self:output(args.code)
     return self:reset()
   end
@@ -1218,6 +1089,9 @@ function Inline:start_diff(args)
       end,
     },
   })
+  if not self.diff_ui then
+    return self:reset()
+  end
   self:_track_region(args)
 end
 

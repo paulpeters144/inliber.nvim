@@ -61,8 +61,8 @@ function InputModal:prompt(on_submit, opts)
   end
 
   vim.keymap.set({ "i", "n" }, "<CR>", function()
-    local line = vim.trim(api.nvim_buf_get_lines(bufnr, 0, 1, false)[1] or "")
-    finish(line ~= "" and line or nil)
+    local prompt = vim.trim(table.concat(api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n"))
+    finish(prompt ~= "" and prompt or nil)
   end, { buffer = bufnr })
 
   vim.keymap.set({ "i", "n" }, "<Esc>", function()

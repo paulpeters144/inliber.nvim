@@ -33,13 +33,12 @@ end
 ---@param opts table
 ---@return nil
 local function adapter_config(opts)
-  if opts and opts.adapters and opts.adapters.http then
-    if config.adapters.http.opts.show_presets then
+  if opts and opts.adapters and opts.adapters.acp then
+    if config.adapters.acp.opts.show_presets then
       local adapters_util = require("inliber.adapters.utils")
-      adapters_util.extend(config.adapters.http, opts.adapters.http)
+      adapters_util.extend(config.adapters.acp, opts.adapters.acp)
     else
-      config.adapters.http =
-        vim.tbl_deep_extend("keep", opts.adapters.http, { opts = config.adapters.http.opts })
+      config.adapters.acp = vim.tbl_deep_extend("keep", opts.adapters.acp, { opts = config.adapters.acp.opts })
     end
   end
 end

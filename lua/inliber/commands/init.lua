@@ -6,20 +6,19 @@
 ---@class Inliber.Command.Opts:table
 ---@field desc string
 
-local inliber = require("inliber")
 local config = require("inliber.config")
+local inliber = require("inliber")
 
 local _cached_adapters = nil
-local hidden = config.adapters.http.opts.hidden
 
----Get the available HTTP adapters from the config
+---Get the available ACP adapters from the config
 ---@return string[]
 local function get_adapters()
   if not _cached_adapters then
     _cached_adapters = vim
-      .iter(config.adapters.http)
+      .iter(config.adapters.acp)
       :filter(function(k, _)
-        return k ~= "extend" and k ~= "opts" and not hidden[k]
+        return k ~= "extend" and k ~= "opts"
       end)
       :map(function(k, _)
         return k

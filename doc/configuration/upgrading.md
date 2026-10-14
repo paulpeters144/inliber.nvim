@@ -8,6 +8,29 @@ This document provides a guide for upgrading from one version of Inliber to anot
 
 Inliber follows [semantic versioning](https://semver.org/) and to avoid breaking changes, it is recommended to pin the plugin to a specific version in your Neovim configuration. The [installation guide](/installation) provides more information on how to do this.
 
+## To the ACP-Only Release
+
+Inliber is now ACP-only, mirroring codecompanion.nvim. HTTP adapters and the plugin's own tool ecosystem have been removed — agents bring their own tools.
+
+### Adapters
+
+- All HTTP adapters are gone, along with `lua/inliber/http.lua`. Inliber speaks the [Agent Client Protocol](/configuration/adapters-acp) exclusively
+- The default inline adapter is now `copilot_acp` (previously `copilot`)
+- `config.adapters.http` has moved to `config.adapters.acp`. The `allow_insecure`, `proxy`, `cache_models_for` and `hidden` options are gone; `show_presets` remains
+- Models are set through `defaults.session_config_options` on the adapter, or `{ name = ..., model = ... }` per interaction — see [Setting Default Session Config Options](/configuration/adapters-acp#setting-default-session-config-options)
+- The `adapters.get_handler`/`adapters.call_handler` API is gone, along with `parse_inline` and structured outputs on adapters
+
+### Tools
+
+- The `tools` config block and `lua/inliber/tools/` are gone. Agents use their own tools
+- `interactions.inline.tools` is gone; the inline interaction has no tool loop
+- Tool approvals were removed with them. The inline diff keeps its own per-buffer "always accept" list
+
+### Config
+
+- `config.tools` no longer exists
+- `interactions.inline.adapter` is now an ACP adapter name
+
 ## v18.7.0 to v19.0.0
 
 - The Super Diff has now been removed from Inliber ([#2600](https://github.com/paulpeters144/inliber.nvim/pull/2600))

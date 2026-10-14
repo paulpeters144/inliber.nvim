@@ -1,0 +1,783 @@
+local h = require("tests.helpers")
+local new_set = MiniTest.new_set
+
+local child = MiniTest.new_child_neovim()
+
+local T = new_set({
+  hooks = {
+    pre_case = function()
+      child.restart({ "-u", "scripts/minimal_init.lua" })
+
+      -- Load the ACP module in child
+      child.lua([[
+        package.loaded['inliber.adapters.utils'] = {
+          get_env_vars = function(a) return a end,
+          set_env_vars = function(_, x) return x end,
+        }
+
+        ACP = require('inliber.acp')
+
+        -- Helper to load test stubs
+        function load_acp_stub(filename)
+          local path = 'tests/stubs/acp/' .. filename
+          local lines = vim.fn.readfile(path)
+          return table.concat(lines, '\n')
+        end
+
+        -- Test adapter configuration
+        test_adapter = {
+          name = "test_acp",
+          command = {"node", "test-acp-cli"},
+          env = { GEMINI_API_KEY = "test-key" },
+          defaults = {
+            auth_method = "gemini-api-key",
+            timeout = 2e4,
+            mcpServers = {}
+          },
+          parameters = {
+            clientCapabilities = { fs = { readTextFile = true, writeTextFile = true } },
+            clientInfo = { name = "Inliber.nvim", version = "1.0.0" },
+            protocolVersion = 1
+          },
+          handlers = {
+            form_messages = function(adapter, messages)
+              return messages
+            end
+          }
+        }
+
+        -- Create a basic connection with schedule_wrap mocked (for response/dispatch tests)
+        function create_test_connection(extra_opts)
+          local opts = vim.tbl_extend("force", { schedule_wrap = function(fn) return fn end }, extra_opts or {})
+          return ACP.new({ adapter = test_adapter, opts = opts })
+        end
+
+        -- Create a connection ready for connection tests (process mocked, prepare_adapter bypassed)
+        function create_init_connection(extra_opts)
+          local connection = create_test_connection(
+            vim.tbl_extend("force", { job = function() return { write = function() end } end }, extra_opts or {})
+          )
+          function connection:prepare_adapter() return test_adapter end
+          connection._state.handle = { write = function() end }
+          return connection
+        end
+      ]])
+    end,
+    post_once = child.stop,
+  },
+})
+
+T["ACP Connection"] = new_set()
+
+T["ACP Connection"]["can create connection with adapter"] = function()
+  local result = child.lua([[
+    local connection = ACP.new({ adapter = test_adapter })
+    return {
+      has_adapter = connection.adapter ~= nil,
+      adapter_name = connection.adapter.name,
+      initialized = connection._initialized,
+      authenticated = connection._authenticated
+    }
+  ]])
+
+  h.eq(result.has_adapter, true)
+  h.eq(result.adapter_name, "test_acp")
+  h.eq(result.initialized, false)
+  h.eq(result.authenticated, false)
+end
+
+T["ACP Connection"]["can handle real initialize response"] = function()
+  child.lua([[
+    connection = create_init_connection()
+    connection:handle_rpc_message(load_acp_stub('initialize_response.txt'))
+  ]])
+
+  local result = child.lua([[
+    return {
+      has_response = connection.pending_responses[1] ~= nil,
+      pending_count = vim.tbl_count(connection.pending_responses),
+      response = connection.pending_responses[1]
+    }
+  ]])
+
+  h.eq(result.has_response, true)
+  h.eq(result.response[1].authMethods[2].id, "gemini-api-key")
+end
+
+T["ACP Connection"]["connect_and_authenticate + renew_session end-to-end with real responses"] = function()
+  local result = child.lua([[
+    local init_resp = vim.json.decode(load_acp_stub('initialize_response.txt'))
+    local auth_resp = vim.json.decode(load_acp_stub('authenticate_response.txt'))
+    local sess_resp = vim.json.decode(load_acp_stub('session_new_response.txt'))
+
+    local connection = create_init_connection()
+    function connection:send_rpc_request(method, params)
+      if method == "initialize" then
+        return init_resp.result
+      elseif method == "authenticate" then
+        return auth_resp.result
+      elseif method == "session/new" then
+        return sess_resp.result
+      end
+      return nil
+    end
+
+    local conn = connection:connect_and_authenticate()
+    local renewed = conn and conn:renew_session()
+    return {
+      ok = conn ~= nil and renewed == true,
+      initialized = connection._initialized,
+      authenticated = connection._authenticated,
+      session_id = connection.session_id,
+    }
+  ]])
+
+  h.eq(result.ok, true)
+  h.eq(result.initialized, true)
+  h.eq(result.authenticated, true)
+  h.eq(result.session_id, "4fecd096-bb15-492e-a0da-95f6b9f4145a")
+end
+
+T["ACP Connection"]["skips authenticate when agent has no auth methods"] = function()
+  local result = child.lua([[
+    local calls = {}
+    local connection = create_init_connection()
+    function connection:send_rpc_request(method, params)
+      table.insert(calls, method)
+      if method == "initialize" then
+        return { protocolVersion = 1, authMethods = {}, agentCapabilities = {} }
+      elseif method == "session/new" then
+        return { sessionId = "sid-1" }
+      end
+    end
+
+    local conn = connection:connect_and_authenticate()
+    local renewed = conn and conn:renew_session()
+    return {
+      ok = conn ~= nil and renewed == true,
+      session_id = connection.session_id,
+      authed = connection._authenticated,
+      called = calls
+    }
+  ]])
+
+  h.eq(result.ok, true)
+  h.eq(result.session_id, "sid-1")
+  h.eq(result.authed, true)
+  h.eq(true, not vim.tbl_contains(result.called, "authenticate"))
+end
+
+T["ACP Connection"]["session/new stores config options metadata"] = function()
+  local result = child.lua([[
+    local connection = create_init_connection()
+    function connection:send_rpc_request(method, params)
+      if method == "initialize" then
+        return { protocolVersion = 1, authMethods = {}, agentCapabilities = {} }
+      elseif method == "session/new" then
+        return {
+          sessionId = "new-session",
+          configOptions = {
+            {
+              type = "select",
+              id = "model",
+              name = "Model",
+              category = "model",
+              currentValue = "claude-opus",
+              options = { { value = "claude-opus", name = "Claude Opus" } },
+            },
+          },
+        }
+      end
+    end
+
+    local conn = connection:connect_and_authenticate()
+    local renewed = conn and conn:renew_session()
+    return {
+      ok = conn ~= nil and renewed == true,
+      config_options_count = #connection._config_options,
+      models = connection:get_models(),
+    }
+  ]])
+
+  h.eq(result.ok, true)
+  h.eq(result.config_options_count, 1)
+  h.eq(#result.models.availableModels, 1)
+  h.eq(result.models.availableModels[1].modelId, "claude-opus")
+end
+
+T["ACP Connection"]["renew_session() creates a fresh session"] = function()
+  local result = child.lua([[
+    local connection = create_test_connection()
+    connection.adapter_modified = test_adapter
+    connection.session_id = "old-session"
+    local called = {}
+    function connection:send_rpc_request(method, params)
+      table.insert(called, method)
+      if method == "session/new" then
+        return { sessionId = "fresh-session" }
+      end
+    end
+    local ok = connection:renew_session()
+    return { ok = ok, session_id = connection.session_id, called = called }
+  ]])
+
+  h.eq(result.ok, true)
+  h.eq(result.session_id, "fresh-session")
+  h.eq(true, vim.tbl_contains(result.called, "session/new"))
+end
+
+T["ACP Responses"] = new_set()
+
+T["ACP Responses"]["handles partial JSON messages correctly"] = function()
+  local result = child.lua([[
+    local connection = create_test_connection()
+
+    local processed_messages = {}
+    function connection:handle_rpc_message(line)
+      table.insert(processed_messages, line)
+    end
+
+    connection:buffer_stdout_and_dispatch('{"jsonrpc":"2.0","id":1,')
+    connection:buffer_stdout_and_dispatch('"result":{"test":"value"}}\n')
+    connection:buffer_stdout_and_dispatch('{"jsonrpc":"2.0","id":2,"result":null}\n{"jsonrpc"')
+    connection:buffer_stdout_and_dispatch(':"2.0","id":3,"result":{}}\n')
+
+    return {
+      message_count = #processed_messages,
+      first_message = processed_messages[1],
+      second_message = processed_messages[2],
+      third_message = processed_messages[3],
+    }
+  ]])
+
+  h.eq(result.message_count, 3)
+  h.eq(result.first_message, '{"jsonrpc":"2.0","id":1,"result":{"test":"value"}}')
+  h.eq(result.second_message, '{"jsonrpc":"2.0","id":2,"result":null}')
+  h.eq(result.third_message, '{"jsonrpc":"2.0","id":3,"result":{}}')
+end
+
+T["ACP Responses"]["handles CRLF line endings in stdout"] = function()
+  local result = child.lua([[
+    local connection = create_test_connection()
+    local processed = {}
+    function connection:handle_rpc_message(line)
+      table.insert(processed, line)
+    end
+    connection:buffer_stdout_and_dispatch('{"jsonrpc":"2.0","id":10,"result":{}}\r\n{"jsonrpc":"2.0","id":11,"result":{}}\n')
+    return processed
+  ]])
+
+  h.eq(#result, 2)
+  h.eq(result[1], '{"jsonrpc":"2.0","id":10,"result":{}}')
+  h.eq(result[2], '{"jsonrpc":"2.0","id":11,"result":{}}')
+end
+
+T["ACP Responses"]["processes real streaming prompt responses"] = function()
+  local result = child.lua([[
+    local connection = create_test_connection()
+
+    local updates = {}
+    connection._active_prompt = {
+      handle_session_update = function(self, update)
+        table.insert(updates, update)
+      end
+    }
+
+    local lines = vim.fn.readfile('tests/stubs/acp/prompt_response.txt')
+    local prompt_data = table.concat(lines, '\n') .. '\n'
+
+    connection:buffer_stdout_and_dispatch(prompt_data)
+
+    return {
+      update_count = #updates,
+      first_update_type = updates[1] and updates[1].sessionUpdate,
+      last_update_type = updates[#updates] and updates[#updates].sessionUpdate,
+      thought_chunks = vim.tbl_filter(function(u) return u.sessionUpdate == "agent_thought_chunk" end, updates),
+      message_chunks = vim.tbl_filter(function(u) return u.sessionUpdate == "agent_message_chunk" end, updates),
+    }
+  ]])
+
+  h.eq(result.update_count, 5)
+  h.eq(result.first_update_type, "agent_thought_chunk")
+  h.eq(result.last_update_type, "agent_message_chunk")
+  h.eq(#result.thought_chunks, 4)
+  h.eq(#result.message_chunks, 1)
+  h.eq(result.message_chunks[1].content.text, "Expressive, elegant.")
+end
+
+T["ACP Responses"]["dispatches session/request_permission to active prompt"] = function()
+  local result = child.lua([[
+    local connection = create_test_connection()
+    connection.session_id = "sess-123"
+    local captured = {}
+    connection._active_prompt = {
+      handle_permission_request = function(_, id, params)
+        captured.id = id
+        captured.sid = params.sessionId
+      end
+    }
+    local req = vim.json.encode({
+      jsonrpc = "2.0",
+      id = 99,
+      method = "session/request_permission",
+      params = { sessionId = "sess-123", options = {}, toolCall = { toolCallId = "tc1" } }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\r\n")
+    return captured
+  ]])
+  h.eq(result.id, 99)
+  h.eq(result.sid, "sess-123")
+end
+
+T["ACP Responses"]["_handle_done when stopReason present"] = function()
+  local result = child.lua([[
+    local connection = create_test_connection()
+    local seen
+    connection._active_prompt = {
+      _request_id = 1,
+      handle_done = function(_, sr) seen = sr end
+    }
+    connection:handle_rpc_message('{"jsonrpc":"2.0","id":1,"result":{"stopReason":"end_turn"}}')
+    return seen
+  ]])
+  h.eq(result, "end_turn")
+end
+
+T["ACP Connection"]["_handle_exit resets state, calls on_exit and prompts done(canceled)"] = function()
+  local result = child.lua([[
+    local connection = create_test_connection()
+    connection.adapter_modified = {
+      handlers = {
+        on_exit = function(_, code) _G.__on_exit_code = code end
+      }
+    }
+    local seen_done
+    connection._active_prompt = {
+      handle_done = function(_, sr) seen_done = sr end
+    }
+    connection._initialized = true
+    connection._authenticated = true
+    connection.session_id = "sid"
+    connection.pending_responses = { x = 1 }
+
+    connection:handle_process_exit(123, 0)
+
+    return {
+      init = connection._initialized,
+      authed = connection._authenticated,
+      sid = connection.session_id,
+      pending = vim.tbl_count(connection.pending_responses),
+      on_exit_code = _G.__on_exit_code,
+      done_reason = seen_done,
+    }
+  ]])
+
+  h.eq(result.init, false)
+  h.eq(result.authed, false)
+  h.eq(result.sid, nil)
+  h.eq(result.pending, 0)
+  h.eq(result.on_exit_code, 123)
+  h.eq(result.done_reason, "canceled")
+end
+
+T["ACP Responses"]["fs/read_text_file and returns content"] = function()
+  local result = child.lua([[
+    local tmp = vim.fn.tempname()
+    vim.fn.writefile({ "line1", "line2" }, tmp)
+
+    local connection = create_test_connection()
+    connection.session_id = "test-session-123"
+
+    local sent = {}
+    function connection:write_message(data)
+      table.insert(sent, vim.trim(data))
+      return true
+    end
+
+    local req = vim.json.encode({
+      jsonrpc = "2.0",
+      id = 77,
+      method = "fs/read_text_file",
+      params = { sessionId = "test-session-123", path = tmp }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\n")
+
+    local reply = vim.json.decode(sent[#sent])
+    return reply
+  ]])
+
+  h.eq(result.id, 77)
+  h.eq(true, result.result and type(result.result.content) == "string")
+  h.eq(true, result.result.content:find("line1") ~= nil)
+end
+
+T["ACP Responses"]["fs/read_text_file ENOENT returns empty content"] = function()
+  local result = child.lua([[
+    package.loaded["inliber.acp.fs"] = {
+      read_text_file = function(path) return false, "ENOENT: " .. path end
+    }
+    local connection = create_test_connection()
+    connection.session_id = "s1"
+    local sent = {}
+    function connection:write_message(data)
+      table.insert(sent, vim.trim(data))
+      return true
+    end
+    local req = vim.json.encode({
+      jsonrpc = "2.0", id = 5, method = "fs/read_text_file",
+      params = { sessionId = "s1", path = "/tmp/missing.txt" }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\n")
+    return vim.json.decode(sent[#sent])
+  ]])
+  h.eq(result.id, 5)
+  h.eq(result.result.content, "")
+end
+
+T["ACP Responses"]["fs/read_text_file rejects invalid sessionId"] = function()
+  local result = child.lua([[
+    package.loaded["inliber.acp.fs"] = {
+      read_text_file = function(path) return true, "should_not_be_called" end
+    }
+    local connection = create_test_connection()
+    connection.session_id = "correct-session"
+    local sent = {}
+    function connection:write_message(data)
+      table.insert(sent, vim.trim(data))
+      return true
+    end
+    local req = vim.json.encode({
+      jsonrpc = "2.0", id = 6, method = "fs/read_text_file",
+      params = { sessionId = "wrong-session", path = "/tmp/x" }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\n")
+    return vim.json.decode(sent[#sent])
+  ]])
+
+  h.eq(result.id, 6)
+  h.eq(result.error.code, -32602)
+end
+
+T["ACP Responses"]["fs/read_text_file rejects requests without an active session"] = function()
+  local result = child.lua([[
+    local called = false
+    package.loaded["inliber.acp.fs"] = {
+      read_text_file = function(path)
+        called = true
+        return true, "should_not_be_called"
+      end
+    }
+    local connection = create_test_connection()
+    local sent = {}
+    function connection:write_message(data)
+      table.insert(sent, vim.trim(data))
+      return true
+    end
+    local req = vim.json.encode({
+      jsonrpc = "2.0", id = 61, method = "fs/read_text_file",
+      params = { sessionId = "missing-session", path = "/tmp/x" }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\n")
+    return {
+      called = called,
+      reply = vim.json.decode(sent[#sent]),
+    }
+  ]])
+
+  h.is_false(result.called)
+  h.eq(result.reply.id, 61)
+  h.eq(result.reply.error.code, -32602)
+end
+
+T["ACP Responses"]["fs/write_text_file and responds with null"] = function()
+  local result = child.lua([[
+    local writes = {}
+    package.loaded["inliber.acp.fs"] = {
+      write_text_file = function(path, content)
+        table.insert(writes, { path = path, content = content })
+        return true
+      end
+    }
+
+    local connection = create_test_connection()
+    connection.session_id = "test-session-123"
+
+    local sent = {}
+    function connection:write_message(data)
+      table.insert(sent, vim.trim(data))
+      return true
+    end
+
+    local req = vim.json.encode({
+      jsonrpc = "2.0",
+      id = 42,
+      method = "fs/write_text_file",
+      params = {
+        sessionId = "test-session-123",
+        path = "/tmp/inliber_write.lua",
+        content = "print('ok')\n",
+      }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\n")
+
+    return {
+      writes = writes,
+      sent = vim.tbl_map(function(s) return vim.json.decode(s) end, sent),
+    }
+  ]])
+
+  -- Verify the write happened and we responded result=null
+  h.eq(#result.writes, 1)
+  h.eq(result.writes[1].path, "/tmp/inliber_write.lua")
+  h.eq(result.writes[1].content, "print('ok')\n")
+
+  h.eq(#result.sent, 1)
+  h.eq(result.sent[1].id, 42)
+  h.eq(result.sent[1].result, vim.NIL)
+end
+
+T["ACP Responses"]["fs/write_text_file rejects invalid sessionId"] = function()
+  local result = child.lua([[
+    package.loaded["inliber.acp.fs"] = {
+      write_text_file = function(path, content)
+        error("should not be called for wrong session")
+      end
+    }
+
+    local connection = create_test_connection()
+    connection.session_id = "correct-session"
+
+    local sent = {}
+    function connection:write_message(data)
+      table.insert(sent, vim.trim(data))
+      return true
+    end
+
+    local req = vim.json.encode({
+      jsonrpc = "2.0",
+      id = 7,
+      method = "fs/write_text_file",
+      params = {
+        sessionId = "wrong-session",
+        path = "/tmp/inliber_write_bad.lua",
+        content = "nope",
+      }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\n")
+
+    return vim.tbl_map(function(s) return vim.json.decode(s) end, sent)
+  ]])
+
+  h.eq(#result, 1)
+  h.eq(result[1].id, 7)
+
+  -- JSON-RPC error response expected
+  h.eq(type(result[1].error), "table")
+  h.eq(result[1].error.code, -32602)
+end
+
+T["ACP Responses"]["fs/write_text_file rejects requests without an active session"] = function()
+  local result = child.lua([[
+    local called = false
+    package.loaded["inliber.acp.fs"] = {
+      write_text_file = function(path, content)
+        called = true
+        return true
+      end
+    }
+
+    local connection = create_test_connection()
+
+    local sent = {}
+    function connection:write_message(data)
+      table.insert(sent, vim.trim(data))
+      return true
+    end
+
+    local req = vim.json.encode({
+      jsonrpc = "2.0",
+      id = 71,
+      method = "fs/write_text_file",
+      params = {
+        sessionId = "missing-session",
+        path = "/tmp/inliber_write_bad.lua",
+        content = "nope",
+      }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\n")
+
+    return {
+      called = called,
+      reply = vim.json.decode(sent[#sent]),
+    }
+  ]])
+
+  h.is_false(result.called)
+  h.eq(result.reply.id, 71)
+  h.eq(result.reply.error.code, -32602)
+end
+
+T["ACP Responses"]["fs/write_text_file failure returns JSON-RPC error"] = function()
+  local result = child.lua([[
+    package.loaded["inliber.acp.fs"] = {
+      write_text_file = function(_) return nil, "EACCES" end
+    }
+    local connection = create_test_connection()
+    connection.session_id = "s1"
+    local sent = {}
+    function connection:write_message(data)
+      table.insert(sent, vim.trim(data))
+      return true
+    end
+    local req = vim.json.encode({
+      jsonrpc = "2.0", id = 8, method = "fs/write_text_file",
+      params = { sessionId = "s1", path = "/root/forbidden", content = "x" }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\n")
+    return vim.json.decode(sent[#sent])
+  ]])
+
+  h.eq(result.id, 8)
+  h.eq(type(result.error), "table")
+  h.is_true(result.error.message:find("fs/write_text_file failed") ~= nil)
+end
+
+T["ACP Responses"]["fs/read_text_file rejected when the adapter lacks fs capability"] = function()
+  local result = child.lua([[
+    local called = false
+    package.loaded["inliber.acp.fs"] = {
+      read_text_file = function(path)
+        called = true
+        return true, "should_not_be_called"
+      end
+    }
+    local connection = create_test_connection()
+    connection.adapter.parameters.clientCapabilities = {}
+    connection.session_id = "s1"
+    local sent = {}
+    function connection:write_message(data)
+      table.insert(sent, vim.trim(data))
+      return true
+    end
+    local req = vim.json.encode({
+      jsonrpc = "2.0", id = 9, method = "fs/read_text_file",
+      params = { sessionId = "s1", path = "/tmp/x" }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\n")
+    return {
+      called = called,
+      reply = vim.json.decode(sent[#sent]),
+    }
+  ]])
+
+  h.is_false(result.called)
+  h.eq(result.reply.id, 9)
+  h.eq(result.reply.error.code, -32601)
+end
+
+T["ACP Responses"]["fs/write_text_file rejected when the adapter lacks fs capability"] = function()
+  local result = child.lua([[
+    local called = false
+    package.loaded["inliber.acp.fs"] = {
+      write_text_file = function(path, content)
+        called = true
+        return true
+      end
+    }
+    local connection = create_test_connection()
+    connection.adapter.parameters.clientCapabilities = {}
+    connection.session_id = "s1"
+    local sent = {}
+    function connection:write_message(data)
+      table.insert(sent, vim.trim(data))
+      return true
+    end
+    local req = vim.json.encode({
+      jsonrpc = "2.0", id = 10, method = "fs/write_text_file",
+      params = { sessionId = "s1", path = "/tmp/x", content = "nope" }
+    })
+    connection:buffer_stdout_and_dispatch(req .. "\n")
+    return {
+      called = called,
+      reply = vim.json.decode(sent[#sent]),
+    }
+  ]])
+
+  h.is_false(result.called)
+  h.eq(result.reply.id, 10)
+  h.eq(result.reply.error.code, -32601)
+end
+
+T["ACP Responses"]["ignores notifications for other sessions"] = function()
+  local result = child.lua([[
+    local connection = create_test_connection()
+    connection.session_id = "session-A"
+
+    local updates = {}
+    connection._active_prompt = {
+      handle_session_update = function(self, u)
+        table.insert(updates, u)
+      end
+    }
+
+    -- Notification for a different session (should be ignored)
+    local other = vim.json.encode({
+      jsonrpc = "2.0",
+      method = "session/update",
+      params = { sessionId = "session-B", update = { sessionUpdate = "agent_message_chunk", content = { type="text", text="ignored" } } }
+    })
+    -- Notification for current session (should be processed)
+    local ours = vim.json.encode({
+      jsonrpc = "2.0",
+      method = "session/update",
+      params = { sessionId = "session-A", update = { sessionUpdate = "agent_message_chunk", content = { type="text", text="seen" } } }
+    })
+
+    connection:buffer_stdout_and_dispatch(other .. "\n" .. ours .. "\n")
+    return { count = #updates, last = updates[#updates] and updates[#updates].content and updates[#updates].content.text }
+  ]])
+
+  h.eq(result.count, 1)
+  h.eq(result.last, "seen")
+end
+
+T["ACP Responses"]["error response notifies active prompt"] = function()
+  local result = child.lua([[
+    local connection = create_test_connection({ schedule = function(fn) fn() end })
+
+    local error_handled = false
+    local captured_error = nil
+
+    connection._active_prompt = {
+      handle_error = function(self, err)
+        error_handled = true
+        captured_error = err
+      end
+    }
+
+    -- Simulate error response with nested error data
+    local error_response = vim.json.encode({
+      jsonrpc = "2.0",
+      id = 5,
+      error = {
+        code = -32603,
+        message = "Internal error",
+        data = {
+          error = "LLM provider error: quota exceeded"
+        }
+      }
+    })
+
+    connection:handle_rpc_message(error_response)
+
+    return {
+      error_handled = error_handled,
+      error_message = captured_error,
+    }
+  ]])
+
+  h.eq(result.error_handled, true)
+  h.eq(result.error_message, "LLM provider error: quota exceeded")
+end
+
+return T

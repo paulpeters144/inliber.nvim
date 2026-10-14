@@ -15,35 +15,42 @@ T["Inline"] = new_set({
         -- Setup inline in child process
         inline = h.setup_inline({
           adapters = {
-            http = {
+            acp = {
               test_adapter = {
                 name = "test_adapter",
-                url = "http://localhost/v1/chat/completions",
+                type = "acp",
                 roles = { llm = "assistant", user = "user" },
-                opts = { stream = true },
-                headers = { content_type = "application/json" },
-                handlers = {
-                  form_parameters = function()
-                    return {}
-                  end,
-                  form_messages = function()
-                    return {}
-                  end,
-                  is_complete = function()
-                    return false
-                  end,
+                commands = {
+                  default = { "test-agent", "--acp" },
                 },
-                schema = {
-                  model = { default = "gpt-3.5-turbo" },
+                defaults = {
+                  mcpServers = {},
+                  timeout = 20000,
                 },
               },
-              fake_adapter = { name = "fake_adapter" },
+              fake_adapter = {
+                name = "fake_adapter",
+                type = "acp",
+                roles = { llm = "assistant", user = "user" },
+                commands = {
+                  default = { "fake-agent", "--acp" },
+                },
+                defaults = {
+                  mcpServers = {},
+                  timeout = 20000,
+                },
+              },
             },
           },
           interactions = {
             inline = {
               adapter = "test_adapter",
               editor_state = { enabled = false },
+            },
+          },
+          display = {
+            diff = {
+              enabled = true,
             },
           },
         })
@@ -119,7 +126,7 @@ T["Inline"]["forms correct prompts"] = function()
 
   local prompts = child.lua([[return inline.prompts]])
   h.eq(#prompts, 4)
-  h.expect_starts_with("You are a knowledgeable", prompts[1].content)
+  h.expect_starts_with("You are writing lua code", prompts[1].content)
   h.eq(
     "For context, this is the code that I've visually selected in the buffer, which is relevant to my prompt:\n<code>\n````lua\nlocal x = 1\n````\n</code>",
     prompts[3].content
@@ -139,26 +146,9 @@ T["Inline"]["uses the ask system prompt when the intent is ask"] = function()
   ]])
 
   local system_prompt = child.lua([[return _G.submitted_prompts[1].content]])
-  h.eq(true, system_prompt:find("NEVER modify the user's code", 1, true) ~= nil)
-  h.eq(false, system_prompt:find("JSON", 1, true) ~= nil)
-end
-
-T["Inline"]["DOES NOT ask for JSON in the tool loop WHEN the intent is ask"] = function()
-  local content = child.lua([[
-    inline.intent = "ask"
-    return inline:_prepare_tool_messages({ { role = "user", content = "<prompt>why?</prompt>" } })[1].content
-  ]])
-
-  h.eq("<prompt>why?</prompt>", content)
-end
-
-T["Inline"]["asks for JSON in the tool loop WHEN the intent is edit"] = function()
-  local content = child.lua([[
-    inline.intent = "edit"
-    return inline:_prepare_tool_messages({ { role = "user", content = "<prompt>fix it</prompt>" } })[1].content
-  ]])
-
-  h.expect_contains('"placement"', content)
+  h.eq(true, system_prompt:find("Never write or modify code", 1, true) ~= nil)
+  h.eq(true, system_prompt:find('"message"', 1, true) ~= nil)
+  h.eq(false, system_prompt:find('"placement"', 1, true) ~= nil)
 end
 
 T["Inline"]["reply resends the full conversation history"] = function()
@@ -197,7 +187,7 @@ T["Inline"]["records the answer and turn when the intent is ask"] = function()
     inline.intent = "ask"
     inline.current_question = "what does this do?"
     inline.current_asked_at = "10:00"
-    inline:done("it prints\n")
+    inline:done('{"message": "it prints"}')
   ]])
 
   local recorded = child.lua([[return _G.recorded]])
@@ -252,7 +242,7 @@ T["Inline"]["the ask float renders speaker labels and an input line"] = function
 
   h.eq(true, vim.tbl_contains(lines, "**You**"))
   h.eq(true, vim.tbl_contains(lines, "why?"))
-  h.eq(true, vim.tbl_contains(lines, "**Inliber**"))
+  h.eq(true, vim.tbl_contains(lines, "**Agent**"))
   h.eq(true, vim.tbl_contains(lines, "because."))
   h.eq("", lines[#lines])
 end
@@ -275,7 +265,7 @@ T["Inline"]["the ask float shows the token count in the winbar"] = function()
   h.eq(true, winbar:find("42 tokens") ~= nil)
 end
 
-T["Inline"]["the ask float shows a thinking indicator until the answer arrives"] = function()
+T["Inline"]["the ask float shows the pending question and locks the input until the answer arrives"] = function()
   local state = child.lua([[
     local float = require("inliber.interactions.inline.ask_float").new()
     float:show({ on_submit = function() end })
@@ -307,9 +297,9 @@ T["Inline"]["the ask float shows a thinking indicator until the answer arrives"]
   end
 
   h.eq(true, has_line(state.thinking_lines, "is it alive?"))
-  h.eq(true, has_line(state.thinking_lines, "Thinking…"))
+  h.eq(false, has_line(state.thinking_lines, "yes"))
   h.eq(false, state.thinking_modifiable)
-  h.eq(false, has_line(state.answered_lines, "Thinking…"))
+  h.eq(true, has_line(state.answered_lines, "yes"))
   h.eq(true, state.answered_modifiable)
 end
 
@@ -326,6 +316,26 @@ T["Inline"]["the ask float submits the question from the input line"] = function
   ]])
 
   h.eq("why is it slow?", submitted)
+end
+
+T["Inline"]["the ask float submits a multi-line paste from the input line"] = function()
+  local submitted = child.lua([[
+    _G.captured = nil
+    local float = require("inliber.interactions.inline.ask_float").new()
+    float:show({ on_submit = function(question) _G.captured = question end })
+    local last = vim.api.nvim_buf_line_count(float.bufnr)
+    vim.api.nvim_buf_set_lines(float.bufnr, last - 1, last, false, {
+      "class Game1",
+      "    {",
+      "    }",
+      "}",
+    })
+    float:_submit_input()
+    float:close()
+    return _G.captured
+  ]])
+
+  h.eq("class Game1\n    {\n    }\n}", submitted)
 end
 
 T["Inline"]["the ask float DOES NOT submit a question while waiting for an answer"] = function()
@@ -361,6 +371,25 @@ T["Inline"]["the input modal collects the first prompt and closes"] = function()
   ]])
 
   h.eq("what is this?", result.asked)
+  h.eq(true, result.closed)
+end
+
+T["Inline"]["the input modal collects a multi-line paste as the first prompt"] = function()
+  local result = child.lua([[
+    _G.asked = nil
+    local modal = require("inliber.interactions.inline.input_modal").new()
+    modal:prompt(function(prompt) _G.asked = prompt end)
+    local bufnr = modal.bufnr
+    vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { "class Game1", "{", "}" })
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "i")) do
+      if map.lhs == "<CR>" then
+        map.callback()
+      end
+    end
+    return { asked = _G.asked, closed = modal.winnr == nil }
+  ]])
+
+  h.eq("class Game1\n{\n}", result.asked)
   h.eq(true, result.closed)
 end
 
@@ -449,14 +478,11 @@ end
 
 T["Inline"]["clears the stop keymap as soon as the request completes"] = function()
   child.lua([[
-    local http = require("inliber.http")
-    _G.original_http_new = http.new
-    http.new = function()
-      return {
-        request = function(_, _, actions)
-          actions.callback("network error")
-        end,
-      }
+    local acp_request = require("inliber.interactions.shared.acp_request")
+    _G.original_submit = acp_request.submit
+    acp_request.submit = function(opts)
+      opts.on_error("network error")
+      return { cancel = function() end }
     end
 
     inline:submit({ { role = "user", content = "test prompt" } })
@@ -473,7 +499,53 @@ T["Inline"]["clears the stop keymap as soon as the request completes"] = functio
 
   h.eq(false, has_stop_keymap)
 
-  child.lua([[require("inliber.http").new = _G.original_http_new]])
+  child.lua([[require("inliber.interactions.shared.acp_request").submit = _G.original_submit]])
+end
+
+T["Inline"]["applies the edit to the REQUESTED buffer WHEN another buffer is focused"] = function()
+  child.lua([[
+    local api = vim.api
+    local config = require("inliber.config")
+    local original_diff_enabled = config.display.diff.enabled
+    config.display.diff.enabled = false
+
+    local buf_a = api.nvim_create_buf(true, false)
+    api.nvim_buf_set_lines(buf_a, 0, -1, false, { "local a = 1", "local b = 2", "local c = 3" })
+    api.nvim_set_current_buf(buf_a)
+    vim.bo[buf_a].filetype = "lua"
+
+    local inline = require("inliber.interactions.inline").new({
+      intent = "edit",
+      buffer_context = {
+        bufnr = buf_a,
+        winnr = api.nvim_get_current_win(),
+        filetype = "lua",
+        start_line = 2,
+        end_line = 2,
+        start_col = 1,
+        end_col = 2147483647,
+      },
+    })
+
+    local buf_b = api.nvim_create_buf(true, false)
+    api.nvim_buf_set_lines(buf_b, 0, -1, false, { "beta" })
+    api.nvim_set_current_buf(buf_b)
+
+    _G.buf_a = buf_a
+    _G.buf_b = buf_b
+
+    inline:done(vim.json.encode({ code = "local b = 22", language = "lua", placement = "replace" }))
+    vim.wait(200)
+
+    config.display.diff.enabled = original_diff_enabled
+  ]])
+
+  h.eq(
+    { "local a = 1", "local b = 22", "local c = 3" },
+    child.lua([[return vim.api.nvim_buf_get_lines(_G.buf_a, 0, -1, true)]])
+  )
+  h.eq({ "beta" }, child.lua([[return vim.api.nvim_buf_get_lines(_G.buf_b, 0, -1, true)]]))
+  h.eq(child.lua([[return _G.buf_b]]), child.lua([[return vim.api.nvim_get_current_buf()]]))
 end
 
 ---Start two edits in one buffer and land their answers, the lower edit asked first
@@ -556,14 +628,11 @@ local function start_two_requests()
     api.nvim_buf_set_lines(0, 0, -1, false, lines)
 
     _G.cancelled = {}
-    require("inliber.http").new = function()
+    require("inliber.interactions.shared.acp_request").submit = function(opts)
+      local line = opts.messages[1].content:match("edit line (%d+)")
       return {
-        request = function(_, _, _, opts)
-          return {
-            cancel = function()
-              table.insert(_G.cancelled, opts.buffer_context.start_line)
-            end,
-          }
+        cancel = function()
+          table.insert(_G.cancelled, tonumber(line))
         end,
       }
     end
@@ -581,7 +650,7 @@ local function start_two_requests()
           end_col = 2147483647,
         },
       })
-      request:_submit({ { role = "user", content = "<prompt>edit</prompt>" } })
+      request:submit({ { role = "user", content = "<prompt>edit line " .. line .. "</prompt>" } })
     end
 
     start_request(2)

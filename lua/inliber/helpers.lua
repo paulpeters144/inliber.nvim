@@ -2,11 +2,13 @@ local M = {}
 
 ---Create and show a diff in a floating window
 ---@param args { from_lines: string[], to_lines: string[], ft: string, banner?: string, skip_default_keymaps?: boolean, chat_bufnr?: number, inline?: boolean, tool_name?: string, title?: string, diff_id: number, marker_add?: string, marker_delete?: string, bufnr?: number, keymaps?: { on_accept?: fun(diff_ui: Inliber.DiffUI), on_always_accept?: fun(diff_ui: Inliber.DiffUI), on_reject?: fun(diff_ui: Inliber.DiffUI) } }
----@return Inliber.DiffUI
+---@return Inliber.DiffUI|nil
 function M.show_diff(args)
   local bufnr = args.bufnr
-  if args.inline and not bufnr then
-    bufnr = vim.api.nvim_get_current_buf()
+
+  if args.inline and (not bufnr or not vim.api.nvim_buf_is_valid(bufnr)) then
+    require("inliber.utils.log"):error("[Diff] Inline diffs need the buffer they were requested on")
+    return nil
   end
 
   if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then

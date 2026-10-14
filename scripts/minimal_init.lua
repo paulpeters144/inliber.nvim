@@ -33,7 +33,7 @@ end
 vim.treesitter.language.register("markdown", "inliber")
 
 -- No test may reach the network. Anything that needs a response must stub the
--- layer it calls, be that the HTTP client's static methods or the adapter itself
+-- layer it calls, be that a mocked ACP connection or an adapter's env helpers
 local curl = require("plenary.curl")
 for _, method in ipairs({ "delete", "get", "head", "patch", "post", "put", "request" }) do
   curl[method] = function(url_or_opts)

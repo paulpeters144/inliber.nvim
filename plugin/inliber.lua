@@ -9,7 +9,8 @@ end
 
 local api = vim.api
 
-api.nvim_set_hl(0, "InliberChatInfo", { link = "DiagnosticInfo", default = true })
+api.nvim_set_hl(0, "InliberSpinner", { fg = "#808080", default = true })
+api.nvim_set_hl(0, "InliberSpinnerDone", { fg = "#98c379", default = true })
 api.nvim_set_hl(0, "InliberChatSubtext", { link = "Comment", default = true })
 api.nvim_set_hl(0, "InliberChatTokens", { link = "Comment", default = true })
 api.nvim_set_hl(0, "InliberChatWarn", { link = "DiagnosticWarn", default = true })

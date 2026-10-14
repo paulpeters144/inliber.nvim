@@ -57,10 +57,6 @@ M.always_accept = {
         if ui.keymaps.on_always_accept then
           return ui.keymaps.on_always_accept(ui)
         end
-
-        -- Default action: add the buffer to the approval class list
-        local approvals = require("inliber.tools.approvals")
-        approvals:always(ui.diff_id, { tool_name = ui.tool_name })
       end,
     })
   end,

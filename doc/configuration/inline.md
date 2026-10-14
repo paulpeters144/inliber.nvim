@@ -1,53 +1,57 @@
 ---
-description: "Configure Inliber's inline interaction for writing and refactoring code directly into Neovim buffers via LLM prompts, without opening a chat buffer."
+description: "Configure Inliber's inline interaction for writing and refactoring code directly into Neovim buffers via ACP agents, without opening a chat buffer."
 ---
 
 # Configuring the Inline Interaction
 
-> [!IMPORTANT]
-> Only **http** adapters are supported for the inline interaction.
-
-<p align="center">
-  <img src="https://github.com/user-attachments/assets/21568a7f-aea8-4928-b3d4-f39c6566a23c" alt="Inline Interaction">
-</p>
-
-Inliber provides an _inline_ interaction for quick, direct editing of your code. Unlike the chat buffer, the inline interaction integrates responses directly into the current buffer—allowing the LLM to add or replace code as needed.
+Inliber provides an _inline_ interaction for quick, direct editing of your code. The interaction integrates responses directly into the current buffer — allowing the agent to add or replace code as needed — and answers questions in a floating window.
 
 ## Changing Adapter
 
-By default, Inliber sets the _copilot_ adapter for the inline interaction. You can change this to any other HTTP adapter:
+By default, Inliber sets the _copilot_acp_ adapter for the inline interaction. You can change this to any other ACP adapter:
+
+```lua
+require("inliber").setup({
+  interactions = {
+    inline = {
+      adapter = "claude_code", -- Or "codex", "gemini_cli", "opencode"...
+    },
+  },
+})
+```
+
+To use a specific model, pass the adapter as a table:
 
 ```lua
 require("inliber").setup({
   interactions = {
     inline = {
       adapter = {
-        name = "anthropic",
-        model = "claude-haiku-4-5-20251001"
+        name = "codex",
+        model = "gpt-5.4",
       },
     },
   },
 })
 ```
 
-See the section on [HTTP Adapters](/configuration/adapters-http) for more information.
+See the section on [ACP Adapters](/configuration/adapters-acp) for more information.
 
 ## Keymaps
 
-The inline interaction supports keymaps for accepting or rejecting changes:
+The inline interaction supports keymaps for accepting or rejecting changes in the diff:
 
 ```lua
 require("inliber").setup({
   interactions = {
-    inline = {
+    shared = {
       keymaps = {
         accept_change = {
-          modes = { n = "ga" },
+          modes = { n = "g2" },
           description = "Accept the suggested change",
         },
         reject_change = {
-          modes = { n = "gr" },
-          opts = { nowait = true },
+          modes = { n = "g3" },
           description = "Reject the suggested change",
         },
       },
@@ -55,8 +59,6 @@ require("inliber").setup({
   },
 })
 ```
-
-In this example, `ga` accepts inline changes, while `gr` rejects them.
 
 You can also cancel an inline request with:
 
@@ -77,34 +79,9 @@ require("inliber").setup({
 })
 ```
 
-## Tools
-
-The inline interaction can give the LLM access to the same [tools](/configuration/tools) as the chat buffer, letting it gather context (e.g. read a file or search the codebase) before producing its response. This is disabled by default:
-
-```lua
-require("inliber").setup({
-  interactions = {
-    inline = {
-      tools = {
-        enabled = true,
-        -- Tools and/or groups loaded for the inline interaction
-        default_tools = { "read_file", "grep_search", "file_search" },
-        opts = {
-          approval_mode = "auto", -- ask|auto|yolo
-        },
-      },
-    },
-  },
-})
-```
-
-Tools run through a hidden chat buffer and reuse the tool definitions from the chat interaction, so any tool configured under `interactions.chat.tools` can be listed here. Because the buffer is hidden, `auto` is the recommended approval mode; the default read-only tools run without prompting in this mode.
-
-**Note:** ACP adapters (like OpenCode, Claude Code) are also supported when tools are enabled. ACP agents use their own built-in tools rather than the Inliber tools listed above.
-
 ## Editor Context
 
-The plugin comes with a number of [editor context](/usage/inline#editor-context) items that can be used alongside your prompt using the `#{}` syntax (e.g., `#{my_new_context_item}`). You can also add your own:
+The plugin comes with a number of [editor context](/usage/inline#editor-context) items that can be used alongside your prompt using the `#{}` syntax (e.g., `#{buffer}`). You can also add your own:
 
 ```lua
 require("inliber").setup({
@@ -119,26 +96,12 @@ require("inliber").setup({
             contains_code = true,
           },
         },
-      }
-    }
-  }
-})
-```
-
-## Layout
-
-If the inline prompt creates a new buffer, you can also customize if this should be output in a vertical/horizontal split or a new buffer:
-
-```lua
-require("inliber").setup({
-  display = {
-    inline = {
-      layout = "vertical", -- vertical|horizontal|tab|buffer
+      },
     },
-  }
+  },
 })
 ```
 
 ## Diff
 
-Please see the [Diff section](chat-buffer#diff) on the Chat Buffer page for configuration options.
+Please see the [Diff section](/configuration/diff) for configuration options.
