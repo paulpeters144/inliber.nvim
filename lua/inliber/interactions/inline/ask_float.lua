@@ -9,6 +9,8 @@ local ui_utils = require("inliber.utils.ui")
 local api = vim.api
 
 local MIN_TEXT_ROWS = 8
+local MIN_WIDTH = 20
+local WIDTH_RATIO = 0.9
 local WINBAR = " <CR> ask · q close "
 
 ---@class Inliber.AskFloat.Config
@@ -101,12 +103,12 @@ function AskFloat:show(opts)
   self.pending_question = nil
 
   if self:_valid() then
-    self:_resize({ width = self:_content_width() })
+    self:_resize({ width = self:_float_width() })
   else
     self:close()
     local bufnr, winnr = ui_utils.create_float({ "" }, {
       title = "Agent",
-      width = self:_content_width(),
+      width = self:_float_width(),
       height = MIN_TEXT_ROWS + 1,
       ft = "markdown",
       ignore_keymaps = true,
@@ -119,7 +121,7 @@ function AskFloat:show(opts)
 
   self:_render()
   self:_set_keymaps()
-  if self.overflows and self.answer_row then
+  if self.answer_row then
     self:_focus_answer()
   else
     self:focus_input()
@@ -150,14 +152,18 @@ function AskFloat:focus_input()
   end
 end
 
----Scroll the latest answer to the top of the window, in normal mode
+---Leave insert mode and focus the answer, scrolling to it when it overflows the window
 ---@return nil
 function AskFloat:_focus_answer()
   api.nvim_set_current_win(self.winnr)
   vim.cmd("stopinsert")
-  api.nvim_win_call(self.winnr, function()
-    vim.fn.winrestview({ lnum = self.answer_row, col = 0, topline = self.answer_row })
-  end)
+  if self.overflows then
+    api.nvim_win_call(self.winnr, function()
+      vim.fn.winrestview({ lnum = self.answer_row, col = 0, topline = self.answer_row })
+    end)
+    return
+  end
+  api.nvim_win_set_cursor(self.winnr, { api.nvim_buf_line_count(self.bufnr), 0 })
 end
 
 ---Close the float and release its buffer
@@ -207,13 +213,11 @@ function AskFloat:_conversation_lines()
   return lines, answer_row
 end
 
----Compute the float width from the conversation content
+---Compute the float width as a ratio of the window, clamped to a usable range
 ---@return number
-function AskFloat:_content_width()
-  local width = 60
-  for _, line in ipairs(self:_conversation_lines()) do
-    width = math.max(width, vim.fn.strdisplaywidth(line) + 1)
-  end
+function AskFloat:_float_width()
+  local width = math.floor(vim.o.columns * WIDTH_RATIO)
+  width = math.max(width, MIN_WIDTH)
   return math.min(width, self.max_width)
 end
 
