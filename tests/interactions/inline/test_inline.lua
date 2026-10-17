@@ -393,6 +393,38 @@ T["Inline"]["the input modal collects a multi-line paste as the first prompt"] =
   h.eq(true, result.closed)
 end
 
+T["Inline"]["the input modal Esc leaves insert mode instead of closing, then closes on a second Esc"] = function()
+  local result = child.lua([[
+    _G.asked = nil
+    local modal = require("inliber.interactions.inline.input_modal").new()
+    modal:prompt(function(prompt) _G.asked = prompt end)
+    local bufnr = modal.bufnr
+
+    local function find(mode, lhs)
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, mode)) do
+        if map.lhs == lhs then
+          return map
+        end
+      end
+    end
+
+    -- Esc is deliberately unmapped in insert mode so it falls back to leaving insert mode
+    local insert_esc = find("i", "<Esc>")
+    local normal_esc = find("n", "<Esc>")
+    normal_esc.callback()
+
+    return {
+      insert_esc_missing = insert_esc == nil,
+      closed_on_normal_esc = modal.winnr == nil,
+      prompt = _G.asked,
+    }
+  ]])
+
+  h.eq(true, result.insert_esc_missing)
+  h.eq(true, result.closed_on_normal_esc)
+  h.eq(nil, result.prompt)
+end
+
 T["Inline"]["generates correct prompt structure"] = function()
   child.lua([[
     _G.submitted_prompts = {}

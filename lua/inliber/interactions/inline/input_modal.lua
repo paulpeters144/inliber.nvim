@@ -65,7 +65,8 @@ function InputModal:prompt(on_submit, opts)
     finish(prompt ~= "" and prompt or nil)
   end, { buffer = bufnr })
 
-  vim.keymap.set({ "i", "n" }, "<Esc>", function()
+  -- Esc leaves insert mode first; only in normal mode does it close the modal
+  vim.keymap.set("n", "<Esc>", function()
     finish(nil)
   end, { buffer = bufnr })
 
