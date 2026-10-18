@@ -785,7 +785,7 @@ function Inline:resume(opts)
   self.bufnr = self.buffer_context.bufnr
 
   if #self.turns == 0 then
-    self.input_modal = require("inliber.interactions.inline.input_modal").new()
+    self.input_modal = require("inliber.interactions.inline.input_modal").new({ intent = "ask" })
     self.input_modal:prompt(function(question)
       if question then
         self:ask(question)

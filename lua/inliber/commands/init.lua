@@ -79,6 +79,7 @@ local function ask_in_float(opts, intent)
 
   local input_modal = require("inliber.interactions.inline.input_modal").new({
     title = intent == "edit" and "Edit" or "Ask",
+    intent = intent,
   })
   inline.input_modal = input_modal
   input_modal:prompt(function(question)

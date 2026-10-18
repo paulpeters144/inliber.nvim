@@ -9,15 +9,22 @@ local ui_utils = require("inliber.utils.ui")
 
 local api = vim.api
 
+local HISTORY_LIMIT = 15
+local history = { ask = {}, edit = {} }
+
 ---@class Inliber.InputModal.Config
 ---@field title? string Title of the input modal
 ---@field input_width? number Width of the input modal in columns
+---@field intent? "ask"|"edit" Intent the prompt history is keyed by
 
 ---@class Inliber.InputModal
 ---@field bufnr? number The buffer holding the input
 ---@field winnr? number The current floating window
 ---@field input_width number Width of the input modal in columns
 ---@field title string Title of the input modal
+---@field intent "ask"|"edit" Intent the prompt history is keyed by
+---@field history_index? number Position in the prompt history while navigating
+---@field draft? string The unsubmitted text saved when history navigation starts
 local InputModal = {}
 
 ---@param opts? Inliber.InputModal.Config
@@ -27,6 +34,7 @@ function InputModal.new(opts)
   return setmetatable({
     input_width = opts.input_width or 60,
     title = opts.title or "Ask",
+    intent = opts.intent or "ask",
   }, { __index = InputModal })
 end
 
@@ -46,6 +54,8 @@ function InputModal:prompt(on_submit, opts)
   })
   self.bufnr = bufnr
   self.winnr = winnr
+  self.history_index = nil
+  self.draft = ""
 
   require("inliber.interactions.shared.agent_commands.completion").attach(bufnr, opts.provider, opts.root)
   require("inliber.interactions.shared.agent_commands.highlight").attach(bufnr, opts.provider, opts.root)
@@ -60,9 +70,22 @@ function InputModal:prompt(on_submit, opts)
     on_submit(prompt)
   end
 
-  vim.keymap.set({ "i", "n" }, "<CR>", function()
-    local prompt = vim.trim(table.concat(api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n"))
-    finish(prompt ~= "" and prompt or nil)
+  local function submit()
+    local prompt = vim.trim(self:_current_prompt())
+    if prompt == "" then
+      finish(nil)
+      return
+    end
+    self:_record(prompt)
+    finish(prompt)
+  end
+
+  vim.keymap.set({ "i", "n" }, "<CR>", submit, { buffer = bufnr })
+  vim.keymap.set("i", "<Up>", function()
+    self:_history_up()
+  end, { buffer = bufnr })
+  vim.keymap.set("i", "<Down>", function()
+    self:_history_down()
   end, { buffer = bufnr })
 
   -- Esc leaves insert mode first; only in normal mode does it close the modal
@@ -93,6 +116,67 @@ function InputModal:close()
   end
   self.winnr = nil
   self.bufnr = nil
+end
+
+---Read the prompt currently in the buffer
+---@return string
+function InputModal:_current_prompt()
+  return table.concat(api.nvim_buf_get_lines(self.bufnr, 0, -1, false), "\n")
+end
+
+---Replace the buffer with a history entry and move the cursor to its end
+---@param text string
+---@return nil
+function InputModal:_show_history_entry(text)
+  local lines = text == "" and { "" } or vim.split(text, "\n")
+  api.nvim_buf_set_lines(self.bufnr, 0, -1, false, lines)
+  local last = api.nvim_buf_line_count(self.bufnr)
+  api.nvim_win_set_cursor(self.winnr, { last, #lines[#lines] })
+end
+
+---Append a submitted prompt to the history, dropping the oldest past the limit
+---@param prompt string
+---@return nil
+function InputModal:_record(prompt)
+  local intent_history = history[self.intent]
+  if intent_history[#intent_history] ~= prompt then
+    table.insert(intent_history, prompt)
+    if #intent_history > HISTORY_LIMIT then
+      table.remove(intent_history, 1)
+    end
+  end
+end
+
+---Step to the previous prompt, saving the current draft on first press
+---@return nil
+function InputModal:_history_up()
+  local intent_history = history[self.intent]
+  if #intent_history == 0 then
+    return
+  end
+  if self.history_index == nil then
+    self.draft = self:_current_prompt()
+    self.history_index = #intent_history
+  else
+    self.history_index = math.max(self.history_index - 1, 1)
+  end
+  self:_show_history_entry(intent_history[self.history_index])
+end
+
+---Step to the next prompt, restoring the draft once past the newest
+---@return nil
+function InputModal:_history_down()
+  local intent_history = history[self.intent]
+  if self.history_index == nil then
+    return
+  end
+  self.history_index = self.history_index + 1
+  if self.history_index > #intent_history then
+    self.history_index = nil
+    self:_show_history_entry(self.draft)
+  else
+    self:_show_history_entry(intent_history[self.history_index])
+  end
 end
 
 return InputModal

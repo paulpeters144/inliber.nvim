@@ -425,6 +425,162 @@ T["Inline"]["the input modal Esc leaves insert mode instead of closing, then clo
   h.eq(nil, result.prompt)
 end
 
+T["Inline"]["the input modal recalls the previous prompt with Up"] = function()
+  local result = child.lua([[
+    local input_modal = require("inliber.interactions.inline.input_modal")
+
+    local function submit(text)
+      local modal = input_modal.new()
+      modal:prompt(function() end)
+      local bufnr = modal.bufnr
+      vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { text })
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "i")) do
+        if map.lhs == "<CR>" then
+          map.callback()
+        end
+      end
+    end
+
+    submit("first prompt")
+    submit("second prompt")
+
+    local modal = input_modal.new()
+    modal:prompt(function() end)
+    local bufnr = modal.bufnr
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "i")) do
+      if map.lhs == "<Up>" then
+        map.callback()
+      end
+    end
+    local recalled = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+    modal:close()
+    return recalled
+  ]])
+
+  h.eq("second prompt", result)
+end
+
+T["Inline"]["the input modal Down restores the unsubmitted draft after Up"] = function()
+  local result = child.lua([[
+    local input_modal = require("inliber.interactions.inline.input_modal")
+
+    local function submit(text)
+      local modal = input_modal.new()
+      modal:prompt(function() end)
+      local bufnr = modal.bufnr
+      vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { text })
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "i")) do
+        if map.lhs == "<CR>" then
+          map.callback()
+        end
+      end
+    end
+
+    submit("older message")
+
+    local modal = input_modal.new()
+    modal:prompt(function() end)
+    local bufnr = modal.bufnr
+    vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { "draft in progress" })
+
+    local function press(lhs)
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "i")) do
+        if map.lhs == lhs then
+          map.callback()
+        end
+      end
+    end
+
+    press("<Up>")
+    local after_up = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+    press("<Down>")
+    local after_down = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+    modal:close()
+    return { after_up = after_up, after_down = after_down }
+  ]])
+
+  h.eq("older message", result.after_up)
+  h.eq("draft in progress", result.after_down)
+end
+
+T["Inline"]["the input modal caps history at 15 prompts"] = function()
+  local oldest = child.lua([[
+    local input_modal = require("inliber.interactions.inline.input_modal")
+
+    local function submit(text)
+      local modal = input_modal.new()
+      modal:prompt(function() end)
+      local bufnr = modal.bufnr
+      vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { text })
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "i")) do
+        if map.lhs == "<CR>" then
+          map.callback()
+        end
+      end
+    end
+
+    for i = 1, 16 do
+      submit("message " .. i)
+    end
+
+    local modal = input_modal.new()
+    modal:prompt(function() end)
+    local bufnr = modal.bufnr
+    for _ = 1, 16 do
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "i")) do
+        if map.lhs == "<Up>" then
+          map.callback()
+        end
+      end
+    end
+    local recalled = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+    modal:close()
+    return recalled
+  ]])
+
+  h.eq("message 2", oldest)
+end
+
+T["Inline"]["the input modal keeps ask and edit histories separate"] = function()
+  local result = child.lua([[
+    local input_modal = require("inliber.interactions.inline.input_modal")
+
+    local function submit(intent, text)
+      local modal = input_modal.new({ intent = intent })
+      modal:prompt(function() end)
+      local bufnr = modal.bufnr
+      vim.api.nvim_buf_set_lines(bufnr, 0, 1, false, { text })
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "i")) do
+        if map.lhs == "<CR>" then
+          map.callback()
+        end
+      end
+    end
+
+    submit("ask", "ask message")
+    submit("edit", "edit message")
+
+    local function recall(intent)
+      local modal = input_modal.new({ intent = intent })
+      modal:prompt(function() end)
+      local bufnr = modal.bufnr
+      for _, map in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "i")) do
+        if map.lhs == "<Up>" then
+          map.callback()
+        end
+      end
+      local recalled = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+      modal:close()
+      return recalled
+    end
+
+    return { ask = recall("ask"), edit = recall("edit") }
+  ]])
+
+  h.eq("ask message", result.ask)
+  h.eq("edit message", result.edit)
+end
+
 T["Inline"]["generates correct prompt structure"] = function()
   child.lua([[
     _G.submitted_prompts = {}

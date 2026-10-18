@@ -37,6 +37,7 @@ local WINBAR = " <CR> ask · q close "
 ---@field thinking boolean Whether the float is waiting on a response
 ---@field tokens? number The cumulative token count to display
 ---@field turns table[] The conversation turns being rendered
+---@field underlying_winnr? number The window beneath the float
 local AskFloat = {}
 
 ---@param opts? Inliber.AskFloat.Config
@@ -106,6 +107,7 @@ function AskFloat:show(opts)
     self:_resize({ width = self:_float_width() })
   else
     self:close()
+    self.underlying_winnr = api.nvim_get_current_win()
     local bufnr, winnr = ui_utils.create_float({ "" }, {
       title = "Agent",
       width = self:_float_width(),
@@ -303,6 +305,12 @@ function AskFloat:_set_keymaps()
   vim.keymap.set("n", "<Esc>", function()
     self:close()
   end, { buffer = bufnr })
+  vim.keymap.set("n", "gf", function()
+    self:_goto_file()
+  end, { buffer = bufnr })
+  vim.keymap.set("n", "gF", function()
+    self:_goto_file({ line = true })
+  end, { buffer = bufnr })
 end
 
 ---Submit the question from the input line and any pasted lines below it
@@ -320,6 +328,59 @@ function AskFloat:_submit_input()
   if on_submit then
     on_submit(question)
   end
+end
+
+---The file under the cursor, resolved against the float's path like gf
+---@return string|nil
+function AskFloat:_file_under_cursor()
+  local file = vim.fn.expand("<cfile>")
+  if file == "" then
+    return nil
+  end
+  local resolved = vim.fn.findfile(file, vim.bo[self.bufnr].path)
+  return resolved ~= "" and resolved or file
+end
+
+---The ":42" line number immediately after the cursor's file reference
+---@param file string
+---@return number|nil
+function AskFloat:_line_number_after(file)
+  local line = api.nvim_get_current_line()
+  local cursor_col = api.nvim_win_get_cursor(0)[2]
+  local from = 1
+  while true do
+    local startpos, endpos = line:find(file, from, true)
+    if not startpos then
+      return nil
+    end
+    if startpos - 1 <= cursor_col and cursor_col < endpos then
+      local number = line:sub(endpos + 1):match("^:(%d+)")
+      return number and tonumber(number) or nil
+    end
+    from = endpos + 1
+  end
+end
+
+---Close the float and open the file under the cursor in the window beneath it
+---@param opts? { line?: boolean } Jump to a trailing ":line" when true
+---@return nil
+function AskFloat:_goto_file(opts)
+  opts = opts or {}
+  local file = self:_file_under_cursor()
+  if not file then
+    return
+  end
+
+  local line_number = opts.line and self:_line_number_after(file) or nil
+
+  self:close()
+
+  if self.underlying_winnr and api.nvim_win_is_valid(self.underlying_winnr) then
+    api.nvim_set_current_win(self.underlying_winnr)
+  end
+
+  local edit = line_number and ("edit +" .. line_number) or "edit"
+  vim.cmd(edit .. " " .. vim.fn.fnameescape(file))
 end
 
 return AskFloat
