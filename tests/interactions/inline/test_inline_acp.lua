@@ -67,6 +67,31 @@ T["Inline ACP"]["stop cancels an ACP request"] = function()
   h.is_true(child.lua_get("_G.cancelled"))
 end
 
+T["Inline ACP"]["cancel_last cancels the most recent request first"] = function()
+  local order = child.lua([[
+    local Inline = require("inliber.interactions.inline")
+    local acp_request = require("inliber.interactions.shared.acp_request")
+    _G.cancel_order = {}
+    function acp_request.submit(opts)
+      local label = opts.messages[1].content
+      return { cancel = function() table.insert(_G.cancel_order, label) end }
+    end
+
+    local first = h.setup_inline({})
+    first:submit({ { role = "user", content = "first" } })
+
+    local second = h.setup_inline({})
+    second:submit({ { role = "user", content = "second" } })
+
+    Inline.cancel_last()
+    Inline.cancel_last()
+
+    return _G.cancel_order
+  ]])
+
+  h.eq({ "second", "first" }, order)
+end
+
 T["Inline ACP"]["uses a leaner system prompt"] = function()
   child.lua([[inline:prompt("print hello")]])
 

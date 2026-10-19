@@ -31,6 +31,7 @@ Two commands make the intent explicit:
 | `:InliberAsk` | Answer the prompt in a floating window, never editing the buffer |
 | `:InliberEdit` | Edit the buffer, never answering in a floating window |
 | `:InliberAskResume` | Resume the last ask conversation in the float, or prompt fresh if none exists |
+| `:InliberCancelLast` | Cancel the most recently submitted request |
 
 Both `Ask` and `Edit` take a prompt (`:InliberEdit refactor this function`), work with a visual selection, and prompt for input when run without one.
 

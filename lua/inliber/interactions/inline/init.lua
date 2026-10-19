@@ -163,6 +163,9 @@ local last_ask = nil
 ---@type table<number, Inliber.Inline[]> The requests waiting on the LLM in each buffer
 local running_requests = {}
 
+---@type Inliber.Inline[] The submitted requests, most recent last
+local submitted_requests = {}
+
 ---Store an ask conversation for later resume
 ---@param inline Inliber.Inline
 ---@return nil
@@ -174,6 +177,15 @@ end
 ---@return Inliber.Inline|nil
 function Inline.last_ask()
   return last_ask
+end
+
+---Cancel the most recently submitted request
+---@return nil
+function Inline.cancel_last()
+  local request = submitted_requests[#submitted_requests]
+  if request then
+    request:stop()
+  end
 end
 
 ---@param args Inliber.InlineArgs
@@ -480,6 +492,9 @@ function Inline:_finish_request()
     return request ~= self
   end, running_requests[self.bufnr] or {})
   running_requests[self.bufnr] = requests
+  submitted_requests = vim.tbl_filter(function(request)
+    return request ~= self
+  end, submitted_requests)
   if #requests == 0 then
     require("inliber.interactions.inline.keymaps").clear_map(config.interactions.inline.keymaps, self.bufnr)
   end
@@ -628,6 +643,7 @@ function Inline:submit(prompt)
   end
   self:_start_request()
   self:_start_spinner()
+  table.insert(submitted_requests, self)
   return self:_submit_acp(prompt)
 end
 

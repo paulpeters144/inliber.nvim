@@ -78,6 +78,7 @@ Inliber registers a few keymaps by default:
 | `<leader>aa` | Ask, answering in a floating window |
 | `<leader>ae` | Edit, in the current buffer |
 | `<leader>ar` | Resume the last ask conversation |
+| `<leader>ad` | Cancel the most recently submitted request |
 
 You can change or disable these with the `opts.default_keymaps` option. See [Other Configuration Options](/configuration/others#default-keymaps).
 

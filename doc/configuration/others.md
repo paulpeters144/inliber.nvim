@@ -98,6 +98,7 @@ Inliber registers a few keymaps when it's set up:
 | `<leader>aa` | Ask, answering in a floating window |
 | `<leader>ae` | Edit, in the current buffer |
 | `<leader>ar` | Resume the last ask conversation |
+| `<leader>ad` | Cancel the most recently submitted request |
 
 You can override them with a list of keymaps. Each entry takes a left-hand side, a right-hand side, a `mode` and a `desc`:
 
@@ -108,6 +109,7 @@ require("inliber").setup({
       { "<leader>aa", "V:InliberAsk<cr>", mode = "n", desc = "Ask" },
       { "<leader>aa", ":InliberAsk<cr>", mode = "v", desc = "Ask" },
       { "<leader>ar", "<cmd>InliberAskResume<cr>", mode = "n", desc = "Resume Ask" },
+      { "<leader>ad", "<cmd>InliberCancelLast<cr>", mode = "n", desc = "Cancel Last Request" },
     },
   },
 })

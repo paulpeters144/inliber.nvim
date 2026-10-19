@@ -156,4 +156,14 @@ return {
       complete = complete,
     },
   },
+  {
+    cmd = "InliberCancelLast",
+    callback = function()
+      require("inliber.interactions.inline").cancel_last()
+    end,
+    opts = {
+      desc = "Cancel the most recently submitted request",
+      nargs = 0,
+    },
+  },
 }

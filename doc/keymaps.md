@@ -11,6 +11,7 @@ Inliber registers a few keymaps by default:
 | `<leader>aa` | Ask, answering in a floating window |
 | `<leader>ae` | Edit, in the current buffer |
 | `<leader>ar` | Resume the last ask conversation |
+| `<leader>ad` | Cancel the most recently submitted request |
 | `q` | Stop the current inline request |
 | `g1` | Always accept changes in this buffer |
 | `g2` | Accept the change |

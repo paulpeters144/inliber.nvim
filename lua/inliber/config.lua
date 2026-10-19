@@ -180,6 +180,7 @@ local defaults = {
       { "<leader>ae", "V:InliberEdit<cr>", mode = "n", desc = "Edit" },
       { "<leader>ae", ":InliberEdit<cr>", mode = "v", desc = "Edit" },
       { "<leader>ar", "<cmd>InliberAskResume<cr>", mode = "n", desc = "Resume Ask" },
+      { "<leader>ad", "<cmd>InliberCancelLast<cr>", mode = "n", desc = "Cancel Last Request" },
     },
   },
 }
